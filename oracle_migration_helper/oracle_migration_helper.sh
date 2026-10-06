@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.04.00 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.04.01 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -161,6 +161,16 @@
 #            (개선15) EN 선택 시 한국어로 나오던 프롬프트 일부 정정 (전체 번역은 아님)
 #            (개선16) printf 포맷 변수(SC2059) 22곳, tr 'a-z' -> [:lower:]
 #            (개선17) 임시 디렉터리 폴백 mkdir -p 제거, Live Monitor 를 dba_datapump_sessions 기준
+#        - [FIX v09.04.01] 외부 리뷰 지적 반영
+#            - TABLE 목록 화면의 테이블 크기에 LOB 세그먼트(SYS_LOB...) 포함
+#            - sql_text_val 이 값 안의 연속 공백을 하나로 줄이던 문제 (앞뒤만 자름)
+#            - 디렉터리 경로: 따옴표 포함/상대경로 거부, 경로 안 공백 보존
+#            - 접속 문자열 마스킹: 비밀번호에 @ 가 있을 때(따옴표/비따옴표) 일부가 노출되던 문제
+#            - Target 테이블스페이스 초기 크기를 Source 실사용량 x1.1 로 (SMALLFILE 30G,
+#              BIGFILE 100G 상한), NEXT 256M/1G — 100M 단위 반복 확장으로 인한 적재 지연 완화
+#            - 마스터 러너 소요 시간을 bash 내장 SECONDS 로 (구형 UNIX date +%s 미지원)
+#            - 자동 산정 PARALLEL 상한 16 (MIG_PARALLEL_CAP), Standard Edition 은 1
+#            - DB Link 복사 등 수동 입력 IN 목록의 작은따옴표 이중화
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -176,7 +186,7 @@
 # ==============================================================================
 
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.04.00"
+SCRIPT_VERSION="09.04.01"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -249,6 +259,10 @@ DB_CPU_COUNT=1
 DB_SGA_GB="Unknown"
 DB_PGA_GB="Unknown"
 DB_CHARSET="Unknown"
+DB_EDITION=""              # [v09.04.01] EE | SE (Data Pump PARALLEL 은 EE 전용)
+# [v09.04.01] 자동 산정 PARALLEL 상한 (직접 입력은 상한 무시). 환경변수 MIG_PARALLEL_CAP 로 변경
+PARALLEL_CAP="${MIG_PARALLEL_CAP:-16}"
+case "$PARALLEL_CAP" in ''|*[!0-9]*|0) PARALLEL_CAP=16 ;; esac
 DB_CONN="/ as sysdba"
 LANG_PREF=""
 DBLINK_SUFFIX=""
@@ -543,7 +557,9 @@ sql_val() {
 
 # [v09.04.00] (개선3) 문자열 값 버전 (VAL: 뒤 전체, 앞뒤 공백 제거)
 sql_text_val() {
-    echo "$1" | sed -n 's/^[[:space:]]*VAL:\(.*\)$/\1/p' | head -n 1 | awk '{$1=$1;print}'
+    # [FIX v09.04.01] awk '{$1=$1}' 는 값 안의 연속 공백/탭까지 하나로 줄였다. 앞뒤만 자른다.
+    echo "$1" | sed -n 's/^[[:space:]]*VAL:\(.*\)$/\1/p' | head -n 1 \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
 # ------------------------------------------------------------------------------
@@ -810,7 +826,16 @@ mask_conn_value() {
     # [FIX v09.04.00] (B24) '@' 가 없는 형태(sys/pw as sysdba)는 예전 식이 맞지 않아
     #   비밀번호가 그대로 출력되었다. '/' 뒤 비밀번호(공백/@ 전까지)만 가리고 나머지는 둔다.
     #   비밀번호가 없는 OS 인증(/ as sysdba)은 그대로 둔다.
-    echo "$1" | sed 's#^\([^/ 	]*\)/[^@ 	][^@ 	]*#\1/****#'
+    # [FIX v09.04.01] 비밀번호에 '@' 가 들어 있으면 첫 '@' 에서 끊겨 나머지가 노출되었다
+    #   (system/"p@ssword"@DB -> system/****@ssword"@DB). 세 경우를 차례로 본다.
+    #     1) 큰따옴표로 감싼 비밀번호        -> 닫는 따옴표까지
+    #     2) 따옴표 없이 '@' 가 있는 경우    -> 공백 전 마지막 '@' 앞까지
+    #     3) '@' 없음 (sys/pw as sysdba)      -> 공백 전까지
+    #   사용자명에 '@' 가 있으면(system@//host/svc) 비밀번호가 없는 것이므로 건드리지 않는다.
+    #   POSIX sed 의 라벨 없는 t (Solaris 기본 sed 포함) 로 먼저 맞은 규칙에서 멈춘다.
+    echo "$1" | sed -e 's#^\([^/@ 	]*\)/"[^"]*"#\1/****#' -e t \
+                    -e 's#^\([^/@ 	]*\)/[^ 	]*@\([^@ 	]*\)#\1/****@\2#' -e t \
+                    -e 's#^\([^/@ 	]*\)/[^@ 	][^@ 	]*#\1/****#'
 }
 
 # 값이 자격증명처럼 보이는지 판정 (키 이름 또는 user/pass@svc 패턴)
@@ -1106,6 +1131,29 @@ save_config_if_requested() {
 
 # ---------------------------------------------------------
 # 언어 선택 모듈 (--lang / --config / --unattended 시 생략)
+# ------------------------------------------------------------------------------
+# [FIX v09.04.01] 디렉터리 물리 경로 검증
+#   경로는 CREATE DIRECTORY ... AS '경로' 의 문자열 리터럴, 생성 셸 스크립트, par 파일에
+#   모두 들어간다. 작은따옴표가 있으면 SQL 이 깨지므로(ORA-01756) 입력 단계에서 거부한다.
+#   (SQL 에서만 '' 로 이중화해도 셸/par 쪽 처리가 제각각이라 거부가 안전하다)
+#   앞뒤 공백만 자르고, 경로 안의 공백은 그대로 둔다 (awk 는 연속 공백을 하나로 줄였다).
+# ------------------------------------------------------------------------------
+trim_ws() {
+    printf '%s\n' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+check_dir_path_safe() {
+    case "$1" in
+        *"'"*|*'"'*)
+            if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] The path must not contain quote characters (' or \"): $1"
+            else echo "  [오류] 경로에 따옴표(' 또는 \")를 쓸 수 없습니다: $1"; fi
+            return 1 ;;
+        /*|+*|[A-Za-z]:*) return 0 ;;
+    esac
+    if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] Enter an absolute path: $1"
+    else echo "  [오류] 절대경로를 입력하십시오: $1"; fi
+    return 1
+}
+
 # ---------------------------------------------------------
 if [ -z "$LANG_PREF" ]; then
     if _cfg_lang=$(cfg_get "LANG_PREF_SAVED"); then
@@ -1356,6 +1404,7 @@ SELECT 'CPU_COUNT:' || value FROM v\$parameter WHERE name='cpu_count';
 SELECT 'SGA_TARGET:' || ROUND(value/1024/1024/1024, 2) FROM v\$parameter WHERE name='sga_target';
 SELECT 'PGA_AGGREGATE_TARGET:' || ROUND(value/1024/1024/1024, 2) FROM v\$parameter WHERE name='pga_aggregate_target';
 SELECT 'CHARSET:' || value FROM nls_database_parameters WHERE parameter='NLS_CHARACTERSET';
+SELECT 'EDITION:' || CASE WHEN banner LIKE '%Enterprise%' OR banner LIKE '%Personal%' THEN 'EE' ELSE 'SE' END FROM v\$version WHERE banner LIKE 'Oracle%' AND ROWNUM = 1;
 SELECT 'CLUSTER_DATABASE:' || UPPER(value) FROM v\$parameter WHERE name='cluster_database';
 DECLARE
   v_is_cdb VARCHAR2(10) := 'NO';
@@ -1450,6 +1499,7 @@ CONNECT_EOF
     DB_SGA_GB=$(grep "SGA_TARGET:" "$tmp_out" | cut -d':' -f2)
     DB_PGA_GB=$(grep "PGA_AGGREGATE_TARGET:" "$tmp_out" | cut -d':' -f2)
     DB_CHARSET=$(grep "CHARSET:" "$tmp_out" | cut -d':' -f2)
+    DB_EDITION=$(grep "EDITION:" "$tmp_out" | cut -d':' -f2 | tr -d ' ')
     # [v09.02] 수집 SQL 이 이미 UPPER(value) 를 쓰므로 소문자가 올 일은 없지만,
     #   바로 아래 IS_CDB / CON_NAME 은 셸에서 tr 을 한 번 더 거는 반면 이 값만
     #   SQL 에만 의존하는 비대칭이 있었다. 수동 입력 경로(아래)와도 형태를
@@ -1607,8 +1657,12 @@ SQL_EOF
             while true; do
                 printf "  Physical Disk Path (Path): "
                 _read DIR_PHYSICAL_PATH
-                DIR_PHYSICAL_PATH=$(echo "$DIR_PHYSICAL_PATH" | awk '{$1=$1;print}')
-                [ -n "$DIR_PHYSICAL_PATH" ] && break
+                DIR_PHYSICAL_PATH=$(trim_ws "$DIR_PHYSICAL_PATH")
+                if [ -n "$DIR_PHYSICAL_PATH" ]; then
+                    check_dir_path_safe "$DIR_PHYSICAL_PATH" && break
+                    [ "$UNATTENDED" = "true" ] && return 1
+                    continue
+                fi
                 if [ "$UNATTENDED" = "true" ]; then
                     echo "  [무인모드/ERROR] 필수 입력값이 비어 있습니다. config 파일에 값을 지정하십시오."
                     return 1
@@ -1694,8 +1748,12 @@ CREATE OR REPLACE DIRECTORY $DIR_OBJ_NAME AS '$DIR_PHYSICAL_PATH';"
                 if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Physical Disk Path: "
                 else printf "  실제 물리 디스크 경로를 입력하세요: "; fi
                 _read _sel_path
-                _sel_path=$(echo "$_sel_path" | awk '{$1=$1;print}')
-                [ -n "$_sel_path" ] && break
+                _sel_path=$(trim_ws "$_sel_path")
+                if [ -n "$_sel_path" ]; then
+                    check_dir_path_safe "$_sel_path" && break
+                    [ "$UNATTENDED" = "true" ] && return 1
+                    continue
+                fi
                 if [ "$UNATTENDED" = "true" ]; then
                     echo "  [무인모드/ERROR] 필수 입력값이 비어 있습니다. config 파일에 값을 지정하십시오."
                     return 1
@@ -1784,12 +1842,29 @@ calculate_parallel_degree() {
 
     CALC_PARALLEL=$(( eff_cpu / 2 ))
     [ $CALC_PARALLEL -lt 1 ] && CALC_PARALLEL=1
+    # [FIX v09.04.01] 코어 수의 절반을 그대로 쓰면 128코어에서 64가 된다. 디스크 I/O 와
+    #   SGA/PGA 가 받쳐주지 못하면 오히려 느려지므로 자동 산정값에 상한을 둔다.
+    #   (직접 입력한 값은 상한을 넘어도 존중한다)
+    if [ "$CALC_PARALLEL" -gt "$PARALLEL_CAP" ]; then
+        if [ "$LANG_PREF" = "EN" ]; then echo "  >> [INFO] Auto PARALLEL ${CALC_PARALLEL} capped at ${PARALLEL_CAP} (enter a value to override)."
+        else echo "  >> [안내] 자동 산정 PARALLEL ${CALC_PARALLEL} 을 상한 ${PARALLEL_CAP} 으로 낮춥니다 (직접 입력하면 상한 무시)."; fi
+        CALC_PARALLEL=$PARALLEL_CAP
+    fi
+    # Data Pump 병렬(PARALLEL > 1)은 Enterprise Edition 기능이다. SE 에서는 1 로 동작한다.
+    if [ "$DB_EDITION" = "SE" ]; then
+        if [ "$LANG_PREF" = "EN" ]; then echo "  >> [INFO] Standard Edition detected: Data Pump PARALLEL is limited to 1."
+        else echo "  >> [안내] Standard Edition 입니다: Data Pump PARALLEL 은 1 로만 동작합니다."; fi
+        CALC_PARALLEL=1
+    fi
     
     if [ "$LANG_PREF" = "EN" ]; then printf "  >> Recommended PARALLEL degree: %s (Based on %s cpu cores).\n  Adjust? (Enter: Default, 0: Disable PARALLEL): " "${CALC_PARALLEL}" "${eff_cpu}"
     else printf "  >> 추천 PARALLEL 도수(기본값): %s (CPU 코어 %s개 기준 산정).\n  조정하시겠습니까? (엔터: 기본값 사용, 0: PARALLEL 미사용): " "${CALC_PARALLEL}" "${eff_cpu}"; fi
     _read user_parallel
     if [ -n "$user_parallel" ] && echo "$user_parallel" | grep -qE '^[0-9]+$' 2>/dev/null; then
         CALC_PARALLEL=$user_parallel
+        if [ "$DB_EDITION" = "SE" ] && [ "$CALC_PARALLEL" -gt 1 ]; then
+            echo "  >> [경고/WARN] Standard Edition: PARALLEL=${CALC_PARALLEL} 을 지정해도 1 로 동작합니다."
+        fi
     fi
     
     if [ "$CALC_PARALLEL" -eq 0 ]; then
@@ -2231,15 +2306,19 @@ EOF
 connect $conn_str
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 500
 $PDB_SWITCH_SQL
+-- [FIX v09.04.01] LOB 세그먼트(SYS_LOB...)는 세그먼트명이 테이블명이 아니라서 예전 조인에
+--   걸리지 않아, 화면의 테이블 크기에서 LOB 용량이 빠졌다. LOB 세그먼트를 따로 더한다.
 SELECT 
     t.owner || '.' || t.table_name || '|' ||
     CASE WHEN pt.table_name IS NOT NULL THEN 'Partition' ELSE 'Normal' END || '|' ||
-    NVL(SUM(s.bytes), 0)
+    (NVL((SELECT SUM(s.bytes) FROM dba_segments${DBLINK_SUFFIX} s
+           WHERE s.owner = t.owner AND s.segment_name = t.table_name), 0)
+   + NVL((SELECT SUM(s.bytes) FROM dba_lobs${DBLINK_SUFFIX} l
+           JOIN dba_segments${DBLINK_SUFFIX} s ON s.owner = l.owner AND s.segment_name = l.segment_name
+           WHERE l.owner = t.owner AND l.table_name = t.table_name), 0))
 FROM dba_tables${DBLINK_SUFFIX} t
 LEFT JOIN dba_part_tables${DBLINK_SUFFIX} pt ON t.owner = pt.owner AND t.table_name = pt.table_name
-LEFT JOIN dba_segments${DBLINK_SUFFIX} s ON t.owner = s.owner AND t.table_name = s.segment_name
 $where_clause
-GROUP BY t.owner, t.table_name, pt.table_name
 ORDER BY t.table_name;
 EXIT;
 EOF
@@ -2587,13 +2666,13 @@ generate_target_env_ddl() {
         user_df_dir=$(echo "$user_df_dir" | sed -e 's#/*$##' -e "s/'//g")
         case "$user_df_dir" in
             [Oo][Mm][Ff])
-                _df_sel="' DATAFILE SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;'"
+                _df_spec="''"   # OMF: 파일명 생략
                 _df_users="DATAFILE SIZE 100M"; _df_tsdata="DATAFILE SIZE 500M" ;;
             +*)
-                _df_sel="' DATAFILE ''${user_df_dir}'' SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;'"
+                _df_spec="'''${user_df_dir}'' '"   # ASM 디스크그룹
                 _df_users="DATAFILE '${user_df_dir}' SIZE 100M"; _df_tsdata="DATAFILE '${user_df_dir}' SIZE 500M" ;;
             *)
-                _df_sel="' DATAFILE ''${user_df_dir}/' || LOWER(t.tablespace_name) || '01.dbf'' SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;'"
+                _df_spec="'''${user_df_dir}/' || LOWER(z.tablespace_name) || '01.dbf'' '"   # 디렉터리 경로
                 _df_users="DATAFILE '${user_df_dir}/users01.dbf' SIZE 100M"; _df_tsdata="DATAFILE '${user_df_dir}/ts_data01.dbf' SIZE 500M" ;;
         esac
 
@@ -2629,8 +2708,8 @@ EOF
             # [FIX v09.03.01] (B5) MOCK 생성물도 실제 경로와 같은 형태로 만든다.
             #   (해시를 가져온 경우 / 못 가져와 임의 비밀번호 + 잠금으로 만드는 경우)
             cat <<EOF >> "$ENV_SQL"
-CREATE TABLESPACE USERS ${_df_users} AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
-CREATE BIGFILE TABLESPACE TS_DATA ${_df_tsdata} AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
+CREATE TABLESPACE USERS ${_df_users} AUTOEXTEND ON NEXT 256M MAXSIZE UNLIMITED;
+CREATE BIGFILE TABLESPACE TS_DATA ${_df_tsdata} AUTOEXTEND ON NEXT 1G MAXSIZE UNLIMITED;
 
 PROMPT ========================================================================
 PROMPT 2. Creating Database Users (original password hash preserved when available)
@@ -2668,7 +2747,7 @@ EOF
             _tgt_in_clause=""
             IFS_BACKUP=$IFS; IFS=","
             for _itm in $_tgt_raw_list; do
-                _itm_c=$(echo "$_itm" | awk '{$1=$1;print}')
+                _itm_c=$(echo "$_itm" | awk '{$1=$1;print}' | sed "s/'/''/g")   # [v09.04.01] ' 이중화
                 if [ -n "$_itm_c" ]; then
                     [ -n "$_tgt_in_clause" ] && _tgt_in_clause="${_tgt_in_clause},"
                     _tgt_in_clause="${_tgt_in_clause}'${_itm_c}'"
@@ -2715,15 +2794,32 @@ EOF
 connect $DB_CONN
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 500 TRIMSPOOL ON
 $PDB_SWITCH_SQL
-SELECT 'CREATE ' || CASE WHEN NVL(t.bigfile, 'NO') = 'YES' OR NVL(s.total_mb, 0) >= 30720 THEN 'BIGFILE ' ELSE '' END ||
-       'TABLESPACE ' || t.tablespace_name || ${_df_sel}
-FROM dba_tablespaces${DBLINK_SUFFIX} t
-LEFT JOIN (SELECT tablespace_name, SUM(bytes)/1024/1024 as total_mb FROM dba_data_files${DBLINK_SUFFIX} GROUP BY tablespace_name) s
-  ON t.tablespace_name = s.tablespace_name
-$_tbs_where_clause
+-- [FIX v09.04.01] 초기 크기를 Source 실사용량 기준으로 미리 잡는다.
+--   예전에는 무조건 SIZE 100M / NEXT 100M 이라 1TB 를 적재하면 데이터파일 확장이 약 1만 번
+--   일어나 impdp 가 그만큼 대기했다.
+--   - 초기 크기 = 세그먼트 실사용량(dba_segments) x 1.1 (최소 100M). 할당 크기(dba_data_files)는
+--     빈 공간까지 포함하므로 쓰지 않는다.
+--   - SMALLFILE 은 30G 상한 (8K 블록 파일 한 개 한도 32G, ORA-01144 방지). Source 할당이 30G
+--     이상이면 아래처럼 BIGFILE 로 만들기 때문에 SMALLFILE 이 30G 를 넘을 일은 없다.
+--   - BIGFILE 은 초기 할당을 100G 까지만 한다. 수 TB 를 미리 만들면 파일 초기화(0 채우기)에
+--     오래 걸려 이 단계에서 멈춘 것처럼 보인다. 나머지는 NEXT 1G 로 늘린다 (예전보다 확장 횟수 1/10).
+SELECT 'CREATE ' || CASE WHEN z.big = 'Y' THEN 'BIGFILE ' ELSE '' END ||
+       'TABLESPACE ' || z.tablespace_name || ' DATAFILE ' || ${_df_spec} ||
+       'SIZE ' || z.init_mb || 'M AUTOEXTEND ON NEXT ' || CASE WHEN z.big = 'Y' THEN '1G' ELSE '256M' END ||
+       ' MAXSIZE UNLIMITED;'
+FROM (SELECT t.tablespace_name,
+             CASE WHEN NVL(t.bigfile, 'NO') = 'YES' OR NVL(s.total_mb, 0) >= 30720 THEN 'Y' ELSE 'N' END AS big,
+             LEAST(CASE WHEN NVL(t.bigfile, 'NO') = 'YES' OR NVL(s.total_mb, 0) >= 30720 THEN 102400 ELSE 30720 END,
+                   GREATEST(100, CEIL(NVL(u.used_mb, 0) * 1.1))) AS init_mb
+        FROM dba_tablespaces${DBLINK_SUFFIX} t
+        LEFT JOIN (SELECT tablespace_name, SUM(bytes)/1024/1024 as total_mb FROM dba_data_files${DBLINK_SUFFIX} GROUP BY tablespace_name) s
+          ON t.tablespace_name = s.tablespace_name
+        LEFT JOIN (SELECT tablespace_name, SUM(bytes)/1024/1024 as used_mb FROM dba_segments${DBLINK_SUFFIX} GROUP BY tablespace_name) u
+          ON t.tablespace_name = u.tablespace_name
+      $_tbs_where_clause
 -- [v09.03.02] (E13) TEMP / UNDO 를 이름(TEMP, UNDOTBS1/2)으로만 빼서 TEMP2, UNDOTBS3 같은
 --   것이 CREATE TABLESPACE ... DATAFILE 로 만들어졌다. 영구 테이블스페이스만 대상으로 한다.
-  AND t.contents = 'PERMANENT';
+         AND t.contents = 'PERMANENT') z;
 
 PROMPT
 PROMPT PROMPT ========================================================================
@@ -2880,7 +2976,7 @@ EOF
             _dep_in_clause=""
             IFS_BACKUP=$IFS; IFS=","
             for _itm in $_dep_raw_list; do
-                _itm_c=$(echo "$_itm" | awk '{$1=$1;print}')
+                _itm_c=$(echo "$_itm" | awk '{$1=$1;print}' | sed "s/'/''/g")   # [v09.04.01] ' 이중화
                 if [ -n "$_itm_c" ]; then
                     [ -n "$_dep_in_clause" ] && _dep_in_clause="${_dep_in_clause},"
                     _dep_in_clause="${_dep_in_clause}'${_itm_c}'"
@@ -3337,7 +3433,9 @@ if [ "\$LIST_ONLY" = "true" ]; then
     exit 0
 fi
 
-START_EPOCH=\$(date +%s 2>/dev/null || echo 0)
+# [FIX v09.04.01] Solaris/AIX/HP-UX 기본 date 는 %s 를 지원하지 않아, 0 이 되거나 오류 없이
+#   글자 그대로("%s") 나와 아래 산술식이 깨졌다. 이 러너는 bash 로 돌므로 내장 SECONDS 를 쓴다.
+START_EPOCH=\$SECONDS
 
 log_msg "====================================================================="
 log_msg "  [START] Oracle Datapump Master Pipeline Execution (${_runner_role})"
@@ -3401,7 +3499,7 @@ for s_file in \$STEP_LIST; do
     esac
     while [ \$_attempt -le \$_max_try ]; do
         [ \$_attempt -gt 1 ] && log_msg ">> [RETRY \$_attempt/\$_max_try] \$s_file"
-        step_start=\$(date +%s 2>/dev/null || echo 0)
+        step_start=\$SECONDS
 
         # [FIX v07/B5] v06 은 'sh step | tee' 형태라 \$? 가 tee 의 종료코드였고,
         #              실제 스텝이 실패해도 항상 [PASS] 로 기록되었다.
@@ -3413,7 +3511,7 @@ for s_file in \$STEP_LIST; do
         rm -f "\$_rc_file"
         echo "\$step_rc" | grep -qE '^[0-9]+\$' || step_rc=1
 
-        step_end=\$(date +%s 2>/dev/null || echo 0)
+        step_end=\$SECONDS
         step_duration=\$((step_end - step_start))
         [ \$step_rc -eq 0 ] && break
         [ \$step_rc -eq \$RC_USER_SKIPPED ] && break
@@ -3450,7 +3548,7 @@ for s_file in \$STEP_LIST; do
     fi
 done
 
-END_EPOCH=\$(date +%s 2>/dev/null || echo 0)
+END_EPOCH=\$SECONDS
 TOTAL_ELAPSED=\$((END_EPOCH - START_EPOCH))
 hours=\$((TOTAL_ELAPSED / 3600))
 mins=\$(( (TOTAL_ELAPSED % 3600) / 60 ))
@@ -3508,7 +3606,7 @@ estimate_target_size_bytes() {
     _es_in=""
     IFS_BACKUP=$IFS; IFS=","
     for _ei in $_es_list; do
-        _ei=$(echo "$_ei" | awk '{$1=$1;print}')
+        _ei=$(echo "$_ei" | awk '{$1=$1;print}' | sed "s/'/''/g")   # [v09.04.01] ' 이중화
         if [ -n "$_ei" ]; then
             [ -n "$_es_in" ] && _es_in="${_es_in},"
             _es_in="${_es_in}'${_ei}'"
@@ -5299,7 +5397,8 @@ run_dblink_copy_mode() {
         echo "  [오류] 대상 스키마가 필요합니다."
         return 1
     fi
-    DL_OWNER_IN=$(echo "$dl_owners" | sed "s/[^,]*/'&'/g" | tr '[:lower:]' '[:upper:]')
+    # [FIX v09.04.01] 입력값의 작은따옴표를 '' 로 이중화하는 공용 함수 사용 (SQL 깨짐/주입 방지)
+    DL_OWNER_IN=$(sql_in_list "$dl_owners")
 
     if [ "$LANG_PREF" = "EN" ]; then printf "  Target tables (comma-separated, Enter = all): "
     else printf "  대상 테이블을 지정하세요 (쉼표 구분, 스키마 전체는 엔터): "; fi
@@ -5309,7 +5408,7 @@ run_dblink_copy_mode() {
         DL_TABLE_IN="SELECT table_name FROM dba_tables WHERE owner IN (${DL_OWNER_IN})"
         _dl_scope="스키마 전체"
     else
-        DL_TABLE_IN=$(echo "$dl_tables" | sed "s/[^,]*/'&'/g" | tr '[:lower:]' '[:upper:]')
+        DL_TABLE_IN=$(sql_in_list "$dl_tables")
         _dl_scope="지정 테이블 ${dl_tables}"
     fi
 
@@ -5959,7 +6058,7 @@ EOF
         FINAL_IN_CLAUSE=""
         IFS_BACKUP=$IFS; IFS=","
         for _fi in $FINAL_LIST; do
-            _fi=$(echo "$_fi" | awk '{$1=$1;print}')
+            _fi=$(echo "$_fi" | awk '{$1=$1;print}' | sed "s/'/''/g")   # [v09.04.01] ' 이중화
             if [ -n "$_fi" ]; then
                 [ -n "$FINAL_IN_CLAUSE" ] && FINAL_IN_CLAUSE="${FINAL_IN_CLAUSE},"
                 FINAL_IN_CLAUSE="${FINAL_IN_CLAUSE}'${_fi}'"
