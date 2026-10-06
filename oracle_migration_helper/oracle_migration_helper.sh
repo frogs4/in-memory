@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.03.02 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.04.00 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -123,6 +123,44 @@
 #            (B21) 시퀀스 동기화를 Source 값 기준으로 (내부 스키마·IDENTITY·감소 시퀀스 제외)
 #            (B22) 튜닝 원복을 적용 직전 실제 값으로, 올리기만 함, RAC SID='*'
 #            (B18) DB Link 청크 복사 — 구간 겹침(중복 복사) / NULL 행 누락 / SELECT * 정정
+#        - [FIX v09.04.00] 3차 수정 — P2 (검증/보고서 신뢰도)
+#            (E5)  SET ECHO ON LOGONLY(존재하지 않는 옵션) 제거
+#            (E6)  HASH 수집문을 PL/SQL 로 생성 — XML 엔티티(&apos;) 깨짐, 4000바이트(ORA-01489),
+#                  한 줄 길이 제한, 미지원 타입(JSON/BOOLEAN/VECTOR)의 "||||" 해결.
+#                  컬럼을 3900바이트 묶음별로 해시해 (2k+1) 가중합
+#            (E7)  DB Link 청크 복사: 분할 컬럼이 NUMBER 가 아니면 그 테이블은 단일 세션 적재
+#            (E10) DEEP DIFF 상세 조회 스크립트에 PDB 전환 추가, ENTRY 이름 검증
+#            (B6)  impdp 1단계를 EXCLUDE=INDEX,CONSTRAINT,REF_CONSTRAINT,TRIGGER 로,
+#                  3단계를 INCLUDE=그 네 가지로 (모든 모드). 적재 전 인덱스 생성/3단계 누락 해결
+#            (B16) DEEP DIFF 거짓 FAIL — 시스템 생성 LOB/인덱스 이름, 검증용·이관용 DB Link,
+#                  롤 대상 권한, 도구가 만든 스냅샷 테이블(AS_/TO_/MIG_) 제외
+#            (B17) HASH: CHAR/NCHAR RTRIM, 실패 테이블은 HASH_ERROR 로 남김(자리 행)
+#            (B19) 로그 대조: REMAP_SCHEMA 반영, 같은 테이블명이 하나일 때만 대응, 정확 일치 비교
+#                  (콘솔/HTML 공용 log_match_rows)
+#            (B20) HTML 보고서가 다른 작업의 CSV 를 가져오지 않게 (작업 ID 정확 일치)
+#            (B23) 문자셋 진단을 실제 변환 바이트 수로 측정, US7ASCII 는 확장 없음/DMU 안내
+#            (B24) 접속 문자열 마스킹 정규식 (sys/pw as sysdba 등)
+#            (B26/B27/B28) 대상 목록 정규화/빈 목록 차단, 디스크 점검 실패 시 중단
+#            (B29) TABLE 모드 후보에서 파티션 접미사 제거
+#            (B30) TABLESPACE 모드 통계 대상에 (서브)파티션, 통계 Lock/Unlock 범위 한정
+#            (B32) --unattended --run 7 에 _di_sel 이 없으면 오류로 종료
+#        - [v09.04.00] 4차 개선 — P3
+#            (개선1)  umask 077, 접속 패스워드 평문 경고 (덤프 디렉터리는 022 유지)
+#            (개선2)  흩어진 내부 계정 제외 목록 23곳을 ora_internal_excl / ora_excl_ctx 로 통일
+#            (개선3)  sql_query / sql_query_num / sql_query_text 공통 함수
+#            (개선4)  --run / --lang 값 검증, 값 없는 -c/--run 오류, 무인 실행 종료코드 전달
+#            (개선5)  생성 스크립트 첫머리에서 스크립트 위치로 cd (경로 인자는 절대경로화)
+#            (개선6)  마스터 러너: impdp/expdp/DB Link 복사 자동 재시도 금지, grep -F
+#            (개선8)  데이터파일 기본 위치 OMF/기존 경로, DIRECTORY 권한 PUBLIC -> 이관 계정
+#            (개선9)  ENCRYPTION_PASSWORD 용어 정정(덤프 암호화/ASO), 12c+ ENCRYPTION_PWD_PROMPT
+#            (개선10) scp/rsync/ssh BatchMode, 키 인증 사전 확인
+#            (개선11) ROW COUNT 실패 테이블 COUNT_ERROR 기록 (자리 행)
+#            (개선12) 덤프 크기 추정: 인덱스 제외, TABLE 모드 LOB 포함
+#            (개선13) SCHEMA/TABLE 충돌 검사를 sqlplus 1회로
+#            (개선14) Cleanup: 내부 계정 거부, PDB$SEED/CDB$ROOT 차단, PDB 이름 재입력 확인
+#            (개선15) EN 선택 시 한국어로 나오던 프롬프트 일부 정정 (전체 번역은 아님)
+#            (개선16) printf 포맷 변수(SC2059) 22곳, tr 'a-z' -> [:lower:]
+#            (개선17) 임시 디렉터리 폴백 mkdir -p 제거, Live Monitor 를 dba_datapump_sessions 기준
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -138,7 +176,7 @@
 # ==============================================================================
 
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.03.02"
+SCRIPT_VERSION="09.04.00"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -343,12 +381,14 @@ while [ $# -gt 0 ]; do
             MOCK_MODE="true"
             ;;
         -c|--config)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then echo "[ERROR] $1 에 값이 필요합니다 / $1 requires a value"; exit 1; fi
             shift; CONFIG_FILE="$1"
             ;;
         --config=*)
             CONFIG_FILE=$(echo "$1" | cut -d'=' -f2-)
             ;;
         --save-config)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then echo "[ERROR] $1 에 값이 필요합니다 / $1 requires a value"; exit 1; fi
             shift; SAVE_CONFIG_FILE="$1"
             ;;
         --save-config=*)
@@ -358,16 +398,18 @@ while [ $# -gt 0 ]; do
             UNATTENDED="true"
             ;;
         --run)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then echo "[ERROR] $1 에 값이 필요합니다 / $1 requires a value"; exit 1; fi
             shift; AUTO_MENU="$1"
             ;;
         --run=*)
             AUTO_MENU=$(echo "$1" | cut -d'=' -f2-)
             ;;
         --lang)
-            shift; LANG_PREF=$(echo "$1" | tr 'a-z' 'A-Z')
+            if [ $# -lt 2 ] || [ -z "$2" ]; then echo "[ERROR] $1 에 값이 필요합니다 / $1 requires a value"; exit 1; fi
+            shift; LANG_PREF=$(echo "$1" | tr '[:lower:]' '[:upper:]')
             ;;
         --lang=*)
-            LANG_PREF=$(echo "$1" | cut -d'=' -f2- | tr 'a-z' 'A-Z')
+            LANG_PREF=$(echo "$1" | cut -d'=' -f2- | tr '[:lower:]' '[:upper:]')
             ;;
         *)
             echo "[WARN] 알 수 없는 옵션 무시 / Unknown option ignored: $1"
@@ -380,6 +422,28 @@ if [ -n "$CONFIG_FILE" ] && [ ! -f "$CONFIG_FILE" ]; then
     echo "[ERROR] Config 파일을 찾을 수 없습니다 / Config file not found: $CONFIG_FILE"
     exit 1
 fi
+
+# [v09.04.00] (개선4) 옵션 값 검증
+#   예전에는 --run 99 / --run abc 가 메뉴 루프까지 가서야 걸렸고, --lang 오타(kor)는
+#   조용히 한국어가 되었다. 값이 빠진 -c / --run 은 빈 값으로 진행했다.
+if [ -n "$AUTO_MENU" ]; then
+    case "$AUTO_MENU" in
+        [1-9]|10) : ;;
+        *) echo "[ERROR] --run 값은 1~10 이어야 합니다 / --run must be 1-10: '$AUTO_MENU'"; exit 1 ;;
+    esac
+fi
+case "$LANG_PREF" in
+    ""|KO|EN) : ;;
+    *) echo "[ERROR] --lang 값은 KO 또는 EN 이어야 합니다 / --lang must be KO or EN: '$LANG_PREF'"; exit 1 ;;
+esac
+if [ "$UNATTENDED" = "true" ] && [ -z "$AUTO_MENU" ]; then
+    echo "[ERROR] --unattended 에는 --run <메뉴번호> 가 필요합니다 / --unattended requires --run N"
+    exit 1
+fi
+
+# [v09.04.00] (개선1) 이 도구가 만드는 파일(SQL/로그/CSV/HTML/설정)은 접속 정보나 업무 데이터
+#   일부를 담을 수 있다. 기본 권한을 소유자 전용으로 한다. (.sh 는 700, .par 는 600 으로 따로 지정)
+umask 077
 
 # ------------------------------------------------------------------------------
 # [FIX v07/B3] 트랩 분리
@@ -403,14 +467,17 @@ init_tmpdir() {
         MIG_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/mighelper.XXXXXX" 2>/dev/null)
     fi
     # mktemp 가 없거나 실패한 구형 UNIX 대비 폴백
+    # [v09.04.00] (개선17) 폴백 경로는 -p 없이 만든다. mkdir -p 는 다른 사용자가 미리 만들어 둔
+    #   같은 이름의 디렉터리(예측 가능한 PID 이름)를 그대로 받아들여, 그 사용자가 임시 파일을
+    #   읽거나 바꿔치기할 수 있었다. 새로 만들지 못하면 다음 폴백으로 넘어간다.
     if [ -z "$MIG_TMPDIR" ] || [ ! -d "$MIG_TMPDIR" ]; then
         MIG_TMPDIR="${TMPDIR:-/tmp}/mighelper.$$"
-        mkdir -p "$MIG_TMPDIR" 2>/dev/null
+        (umask 077; mkdir "$MIG_TMPDIR") 2>/dev/null || MIG_TMPDIR=""
     fi
-    if [ ! -d "$MIG_TMPDIR" ]; then
+    if [ -z "$MIG_TMPDIR" ] || [ ! -d "$MIG_TMPDIR" ]; then
         # 마지막 폴백: 현재 디렉토리 (기존 동작)
         MIG_TMPDIR="./.migtmp_$$"
-        mkdir -p "$MIG_TMPDIR" 2>/dev/null
+        (umask 077; mkdir "$MIG_TMPDIR") 2>/dev/null || mkdir -p "$MIG_TMPDIR" 2>/dev/null
     fi
     chmod 700 "$MIG_TMPDIR" 2>/dev/null
     return 0
@@ -473,6 +540,30 @@ to_num() {
 sql_val() {
     echo "$1" | sed -n 's/^[[:space:]]*VAL:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' | head -n 1
 }
+
+# [v09.04.00] (개선3) 문자열 값 버전 (VAL: 뒤 전체, 앞뒤 공백 제거)
+sql_text_val() {
+    echo "$1" | sed -n 's/^[[:space:]]*VAL:\(.*\)$/\1/p' | head -n 1 | awk '{$1=$1;print}'
+}
+
+# ------------------------------------------------------------------------------
+# [v09.04.00] (개선3) 단일 값 조회 공통 함수
+#   sql_query <SQL>  : 현재 접속(DB_CONN) + 컨테이너 전환 후 SQL 실행, 출력 전체를 돌려준다
+#   sql_query_num / sql_query_text <SQL> : 'VAL:' 마커 줄의 값만 (실패 시 빈 값)
+#   같은 connect / SET / PDB 전환 / EXIT 묶음이 수십 곳에 복사돼 있어, 한 곳만 고치고
+#   나머지를 빠뜨리는 일이 반복됐다. 새 코드는 이 함수를 쓴다.
+# ------------------------------------------------------------------------------
+sql_query() {
+    sqlplus -S /nolog <<SQ_EOF 2>/dev/null
+connect $DB_CONN
+SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 4000 TRIMSPOOL ON TRIMOUT ON
+$PDB_SWITCH_SQL
+$1
+EXIT;
+SQ_EOF
+}
+sql_query_num()  { sql_val "$(sql_query "$1")"; }
+sql_query_text() { sql_text_val "$(sql_query "$1")"; }
 
 # ------------------------------------------------------------------------------
 # [FIX v09.03.01] 생성 스크립트에 셸 값을 그대로 박아 넣기 위한 인용
@@ -573,16 +664,30 @@ remap_lookup() {
 #   공용 제외 목록(DEEP_EXCL_OWNERS)에 더해, 12c 이상이면 ORACLE_MAINTAINED='Y'
 #   계정도 뺀다. FK/트리거 일괄 조작이 MDSYS·CTXSYS 같은 내부 스키마에 닿지 않게 한다.
 # ------------------------------------------------------------------------------
+#   [v09.04.00] (개선2) ora_internal_excl <컬럼명> [@DBLINK] [버전]
+#     - 두 번째 인자로 DB Link 접미사를 주면 원격 dba_users 기준으로 뺀다.
+#     - 세 번째 인자로 판단할 DB 버전을 줄 수 있다 (기본: 접속 DB 의 DB_VERSION).
+#     흩어져 있던 하드코딩 목록(진단/HASH/ROW COUNT 등)을 이 함수 하나로 모은다.
 ora_internal_excl() {
     build_exclude_owner_list
     _oie="$1 NOT IN (${DEEP_EXCL_OWNERS})"
-    _oie_major=$(echo "$DB_VERSION" | cut -d'.' -f1 | tr -dc '0-9')
+    _oie_major=$(echo "${3:-$DB_VERSION}" | cut -d'.' -f1 | tr -dc '0-9')
     if [ -n "$_oie_major" ] && [ "$_oie_major" -ge 12 ]; then
-        _oie="$_oie AND $1 NOT IN (SELECT username FROM dba_users WHERE oracle_maintained = 'Y')"
+        _oie="$_oie AND $1 NOT IN (SELECT username FROM dba_users${2} WHERE oracle_maintained = 'Y')"
     fi
     echo "$_oie"
 }
 
+
+# [v09.04.00] (개선2) 지금 질의가 DB Link 너머(DBLINK_SUFFIX)를 보면 원격 기준으로 제외.
+#   원격 DB 버전을 모르므로 그때는 ORACLE_MAINTAINED 조건 없이 공용 목록만 쓴다.
+ora_excl_ctx() {
+    if [ -n "$DBLINK_SUFFIX" ]; then
+        ora_internal_excl "$1" "$DBLINK_SUFFIX" 0
+    else
+        ora_internal_excl "$1"
+    fi
+}
 # ------------------------------------------------------------------------------
 # [FIX v09.03.01] 이관 대상 범위 조건 (Target 측, REMAP 반영 후 이름 기준)
 #   mig_scope_pred <소유자컬럼> <테이블컬럼>
@@ -702,7 +807,10 @@ mask_conn_value() {
     # [FIX v08.07] sed -E 는 Solaris /usr/bin/sed 에 없다. BRE 로 낮춘다.
     #   마스킹은 실패해도 조용히 빈 값이 되어 화면에서만 사라지므로 눈치채기 어렵다.
     #   XPG4 PATH 보정과 별개로, 이 경로만은 기본 sed 로도 동작하게 둔다.
-    echo "$1" | sed 's#^\([^/ 	]*\)/[^@ 	]*\(@.*\)*$#\1/****\2#'
+    # [FIX v09.04.00] (B24) '@' 가 없는 형태(sys/pw as sysdba)는 예전 식이 맞지 않아
+    #   비밀번호가 그대로 출력되었다. '/' 뒤 비밀번호(공백/@ 전까지)만 가리고 나머지는 둔다.
+    #   비밀번호가 없는 OS 인증(/ as sysdba)은 그대로 둔다.
+    echo "$1" | sed 's#^\([^/ 	]*\)/[^@ 	][^@ 	]*#\1/****#'
 }
 
 # 값이 자격증명처럼 보이는지 판정 (키 이름 또는 user/pass@svc 패턴)
@@ -747,17 +855,9 @@ sql_define_off() {
 # ------------------------------------------------------------------------------
 dblink_count() {
     _dlc_name=$(echo "$1" | tr '[:lower:]' '[:upper:]' | sed "s/'/''/g")
-    _dlc_out=$(sqlplus -S /nolog <<EOF 2>/dev/null
-connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 200
-$PDB_SWITCH_SQL
-SELECT 'VAL:' || COUNT(*) FROM dba_db_links
+    sql_query_num "SELECT 'VAL:' || COUNT(*) FROM dba_db_links
  WHERE (db_link = '${_dlc_name}' OR db_link LIKE REPLACE('${_dlc_name}', '_', '\_') || '.%' ESCAPE '\')
-   AND owner IN (USER, 'PUBLIC');
-EXIT;
-EOF
-)
-    sql_val "$_dlc_out"
+   AND owner IN (USER, 'PUBLIC');"
 }
 
 # ------------------------------------------------------------------------------
@@ -1095,12 +1195,14 @@ check_disk_space() {
     fi
 
     if [ ! -d "$target_path" ]; then
-        if [ "$LANG_PREF" = "EN" ]; then printf "  Directory '$target_path' does not exist. Create it? (y/n): "
-        else printf "  디렉토리 '$target_path'가 존재하지 않습니다. 생성하시겠습니까? (y/n): "; fi
+        if [ "$LANG_PREF" = "EN" ]; then printf "  Directory '%s' does not exist. Create it? (y/n): " "${target_path}"
+        else printf "  디렉토리 '%s'가 존재하지 않습니다. 생성하시겠습니까? (y/n): " "${target_path}"; fi
         
         _read ans
         if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
-            mkdir -p "$target_path"
+            # [v09.04.00] (개선1) 덤프 디렉터리는 oracle OS 계정이 써야 하므로 도구 전체의
+            #   umask 077 을 적용하지 않고 예전 권한(umask 022)으로 만든다.
+            (umask 022; mkdir -p "$target_path")
             if [ $? -ne 0 ]; then
                 if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] Failed to create directory. Check permissions."
                 else echo "  [오류] 디렉토리를 생성할 수 없습니다. 권한을 확인하십시오."; fi
@@ -1120,7 +1222,24 @@ check_disk_space() {
 }
 
 # DB 설정 및 sqlplus 확인
+# [v09.04.00] (개선1) 접속 문자열에 패스워드가 들어 있으면, 생성되는 .sh 에 평문으로 남는다는
+#   사실을 한 번 알린다. (파일은 umask 077 / chmod 700 으로 소유자만 읽을 수 있다)
+CONN_PWD_WARNED=""
+warn_conn_plaintext() {
+    [ -n "$CONN_PWD_WARNED" ] && return 0
+    echo "$DB_CONN" | grep -qE '^[^/[:space:]]+/[^@[:space:]]+' || return 0
+    CONN_PWD_WARNED="Y"
+    if [ "$LANG_PREF" = "EN" ]; then
+        echo "  [SECURITY] The connection string contains a password. Generated scripts will hold it"
+        echo "             in plain text (owner-only, mode 700). Prefer '/ as sysdba' or an Oracle Wallet."
+    else
+        echo "  [보안] 접속 문자열에 패스워드가 있습니다. 생성되는 스크립트에 평문으로 들어갑니다"
+        echo "         (소유자만 읽기 가능, 700). 가능하면 '/ as sysdba' 또는 Oracle Wallet 을 쓰십시오."
+    fi
+}
+
 check_db_env() {
+    warn_conn_plaintext
     if [ "$MOCK_MODE" = "true" ]; then
         return 0
     fi
@@ -1335,9 +1454,9 @@ CONNECT_EOF
     #   바로 아래 IS_CDB / CON_NAME 은 셸에서 tr 을 한 번 더 거는 반면 이 값만
     #   SQL 에만 의존하는 비대칭이 있었다. 수동 입력 경로(아래)와도 형태를
     #   맞춰 두면 "= TRUE" 비교가 어느 경로로 들어와도 성립한다.
-    DB_CLUSTER=$(grep "CLUSTER_DATABASE:" "$tmp_out" | cut -d':' -f2 | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
-    IS_CDB=$(grep "IS_CDB:" "$tmp_out" | cut -d':' -f2 | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
-    CURRENT_CON_NAME=$(grep "CON_NAME:" "$tmp_out" | cut -d':' -f2 | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+    DB_CLUSTER=$(grep "CLUSTER_DATABASE:" "$tmp_out" | cut -d':' -f2 | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
+    IS_CDB=$(grep "IS_CDB:" "$tmp_out" | cut -d':' -f2 | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
+    CURRENT_CON_NAME=$(grep "CON_NAME:" "$tmp_out" | cut -d':' -f2 | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
 
     [ -z "$DB_VERSION" ] && DB_VERSION="Unknown"
     [ -z "$DB_CPU_COUNT" ] && DB_CPU_COUNT=1
@@ -1390,14 +1509,14 @@ SQL_EOF
                 else printf "  작업 대상 PDB를 선택하세요 (1-%d 또는 N) [기본값: 1]: " "$pdb_count"; fi
                 _read pdb_choice
                 [ -z "$pdb_choice" ] && pdb_choice="1"
-                pdb_choice_upper=$(echo "$pdb_choice" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+                pdb_choice_upper=$(echo "$pdb_choice" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
 
                 if [ "$pdb_choice_upper" = "N" ]; then
                     if [ "$LANG_PREF" = "EN" ]; then printf "  Enter New PDB Name to Create [Default: APP_PDB]: "
                     else printf "  신규 생성할 PDB 이름을 입력하세요 [기본값: APP_PDB]: "; fi
                     _read new_pdb_input
                     [ -z "$new_pdb_input" ] && new_pdb_input="APP_PDB"
-                    SELECTED_PDB=$(echo "$new_pdb_input" | tr 'a-z' 'A-Z')
+                    SELECTED_PDB=$(echo "$new_pdb_input" | tr '[:lower:]' '[:upper:]')
                     break
                 elif echo "$pdb_choice" | grep -qE '^[0-9]+$'; then
                     matched_pdb=$(grep "^${pdb_choice}:" "$pdb_idx" 2>/dev/null | cut -d':' -f2)
@@ -1495,14 +1614,15 @@ SQL_EOF
                     return 1
                 fi
             done
-            check_disk_space "$DIR_PHYSICAL_PATH"
+            # [FIX v09.04.00] (B27) 디렉토리가 없고 생성을 거부/실패하면 진행하지 않는다.
+            check_disk_space "$DIR_PHYSICAL_PATH" || return 1
             if [ -n "$PDB_SWITCH_SQL" ]; then
                 CREATE_DIR_SQL="${PDB_SWITCH_SQL}
 CREATE OR REPLACE DIRECTORY $DIR_OBJ_NAME AS '$DIR_PHYSICAL_PATH';"
             else
                 CREATE_DIR_SQL="CREATE OR REPLACE DIRECTORY $DIR_OBJ_NAME AS '$DIR_PHYSICAL_PATH';"
             fi
-            GRANT_DIR_SQL="GRANT READ, WRITE ON DIRECTORY $DIR_OBJ_NAME TO PUBLIC;"
+            GRANT_DIR_SQL="AUTO"
             return 0
         fi
     fi
@@ -1555,7 +1675,7 @@ CREATE OR REPLACE DIRECTORY $DIR_OBJ_NAME AS '$DIR_PHYSICAL_PATH';"
             echo "  [무인모드] Directory 선택값이 없어 목록 1번을 사용합니다."
             _dir_sel="1"
         fi
-        _dir_sel_upper=$(echo "$_dir_sel" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+        _dir_sel_upper=$(echo "$_dir_sel" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
         fi
 
         if [ "$_dir_sel_upper" = "N" ]; then
@@ -1614,7 +1734,7 @@ CREATE OR REPLACE DIRECTORY $DIR_OBJ_NAME AS '$DIR_PHYSICAL_PATH';"
     DIR_OBJ_NAME="$_sel_name"
     DIR_PHYSICAL_PATH="$_sel_path"
 
-    check_disk_space "$DIR_PHYSICAL_PATH"
+    check_disk_space "$DIR_PHYSICAL_PATH" || return 1
 
     _dir_prefix=""
     if [ -n "$PDB_SWITCH_SQL" ]; then
@@ -1629,7 +1749,7 @@ CREATE OR REPLACE DIRECTORY $DIR_OBJ_NAME AS '$DIR_PHYSICAL_PATH';"
         _read _create_opt
         if [ "$_create_opt" = "y" ] || [ "$_create_opt" = "Y" ]; then
             CREATE_DIR_SQL="${_dir_prefix}CREATE OR REPLACE DIRECTORY $DIR_OBJ_NAME AS '$DIR_PHYSICAL_PATH';"
-            GRANT_DIR_SQL="GRANT READ, WRITE ON DIRECTORY $DIR_OBJ_NAME TO PUBLIC;"
+            GRANT_DIR_SQL="AUTO"
         else
             CREATE_DIR_SQL=""
             GRANT_DIR_SQL=""
@@ -1640,7 +1760,7 @@ CREATE OR REPLACE DIRECTORY $DIR_OBJ_NAME AS '$DIR_PHYSICAL_PATH';"
         _read _create_opt
         if [ -z "$_create_opt" ] || [ "$_create_opt" = "y" ] || [ "$_create_opt" = "Y" ]; then
             CREATE_DIR_SQL="${_dir_prefix}CREATE OR REPLACE DIRECTORY $DIR_OBJ_NAME AS '$DIR_PHYSICAL_PATH';"
-            GRANT_DIR_SQL="GRANT READ, WRITE ON DIRECTORY $DIR_OBJ_NAME TO PUBLIC;"
+            GRANT_DIR_SQL="AUTO"
         else
             CREATE_DIR_SQL=""
             GRANT_DIR_SQL=""
@@ -1665,8 +1785,8 @@ calculate_parallel_degree() {
     CALC_PARALLEL=$(( eff_cpu / 2 ))
     [ $CALC_PARALLEL -lt 1 ] && CALC_PARALLEL=1
     
-    if [ "$LANG_PREF" = "EN" ]; then printf "  >> Recommended PARALLEL degree: $CALC_PARALLEL (Based on ${eff_cpu} cpu cores).\n  Adjust? (Enter: Default, 0: Disable PARALLEL): "
-    else printf "  >> 추천 PARALLEL 도수(기본값): $CALC_PARALLEL (CPU 코어 ${eff_cpu}개 기준 산정).\n  조정하시겠습니까? (엔터: 기본값 사용, 0: PARALLEL 미사용): "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  >> Recommended PARALLEL degree: %s (Based on %s cpu cores).\n  Adjust? (Enter: Default, 0: Disable PARALLEL): " "${CALC_PARALLEL}" "${eff_cpu}"
+    else printf "  >> 추천 PARALLEL 도수(기본값): %s (CPU 코어 %s개 기준 산정).\n  조정하시겠습니까? (엔터: 기본값 사용, 0: PARALLEL 미사용): " "${CALC_PARALLEL}" "${eff_cpu}"; fi
     _read user_parallel
     if [ -n "$user_parallel" ] && echo "$user_parallel" | grep -qE '^[0-9]+$' 2>/dev/null; then
         CALC_PARALLEL=$user_parallel
@@ -1759,8 +1879,8 @@ reset_generation_state() {
 
 ask_to_run_script() {
     script_path="$1"
-    if [ "$LANG_PREF" = "EN" ]; then printf "  >> Execute the generated script (${script_path}) now? (y/n): "
-    else printf "  >> 방금 생성된 스크립트(${script_path})를 지금 실행하시겠습니까? (y/n): "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  >> Execute the generated script (%s) now? (y/n): " "${script_path}"
+    else printf "  >> 방금 생성된 스크립트(%s)를 지금 실행하시겠습니까? (y/n): " "${script_path}"; fi
     _read run_now
     if [ "$run_now" = "y" ] || [ "$run_now" = "Y" ]; then
         # [FIX v08.02] 생성 스크립트는 #!/bin/bash 셔뱅을 갖는다. sh 로 강제 실행하면
@@ -1786,8 +1906,8 @@ generate_target_pdb_ddl() {
     if [ "$LANG_PREF" = "EN" ]; then echo "  [Oracle Multitenant: Target PDB Provisioning Generator]"
     else echo "  [Oracle Multitenant: Target PDB 신규 생성 DDL 모듈]"; fi
     
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Generate Target PDB Creation DDL (00_create_target_pdb_${UNIQUE_ID}.sql)? (Y/n) [Default: Y]: "
-    else printf "  Target DB에 신규 PDB 생성 DDL(00_create_target_pdb_${UNIQUE_ID}.sql)을 생성하시겠습니까? (Y/n) [기본값: Y]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Generate Target PDB Creation DDL (00_create_target_pdb_%s.sql)? (Y/n) [Default: Y]: " "${UNIQUE_ID}"
+    else printf "  Target DB에 신규 PDB 생성 DDL(00_create_target_pdb_%s.sql)을 생성하시겠습니까? (Y/n) [기본값: Y]: " "${UNIQUE_ID}"; fi
     _read gen_pdb_opt
     if [ -z "$gen_pdb_opt" ] || [ "$gen_pdb_opt" = "y" ] || [ "$gen_pdb_opt" = "Y" ]; then
         _default_new_pdb="APP_PDB"
@@ -1797,7 +1917,7 @@ generate_target_pdb_ddl() {
         else printf "  생성할 PDB 이름을 입력하세요 [기본값: %s]: " "$_default_new_pdb"; fi
         _read user_pdb_name
         [ -z "$user_pdb_name" ] && user_pdb_name="$_default_new_pdb"
-        user_pdb_name=$(echo "$user_pdb_name" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+        user_pdb_name=$(echo "$user_pdb_name" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
 
         if [ "$LANG_PREF" = "EN" ]; then printf "  Enter PDB Admin Username [Default: pdbadmin]: "
         else printf "  PDB 관리자(Admin) 계정명을 입력하세요 [기본값: pdbadmin]: "; fi
@@ -1844,7 +1964,7 @@ generate_target_pdb_ddl() {
 --  Target PDB: ${user_pdb_name}
 --  Generated for Job: ${UNIQUE_ID}
 -- ==============================================================================
-SET ECHO ON LOGONLY SERVEROUTPUT ON
+SET ECHO ON SERVEROUTPUT ON
 -- [SEC v09.02] ADMIN USER 패스워드에 '&' 가 있어도 SQL*Plus 치환변수로 먹히지
 --   않도록 반드시 켜 둔다. 이 줄을 지우면 다른 패스워드로 PDB 가 만들어진다.
 $(sql_define_off)
@@ -1929,6 +2049,7 @@ EOF
 
         cat <<EOF > "$PDB_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -1969,6 +2090,17 @@ EOF
     fi
 }
 
+# [FIX v09.04.00] 수동 입력 안내 — 예전에는 프롬프트 없이 입력을 기다려 멈춘 것처럼 보였다.
+manual_target_prompt() {
+    case "$1" in
+        SCHEMA)     _mtp_ex="HR,SCOTT" ;;
+        TABLE)      _mtp_ex="HR.EMP,HR.DEPT" ;;
+        *)          _mtp_ex="USERS,TS_DATA" ;;
+    esac
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter %s targets manually (comma/space separated, e.g. %s): " "$1" "$_mtp_ex"
+    else printf "  %s 대상을 직접 입력하십시오 (쉼표/공백 구분, 예: %s): " "$1" "$_mtp_ex"; fi
+}
+
 select_migration_targets() {
     target_type="$1"
     conn_str="$2"
@@ -1997,7 +2129,7 @@ connect $conn_str
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 100
 $PDB_SWITCH_SQL
 SELECT username FROM dba_users${DBLINK_SUFFIX}
-WHERE username NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','WMSYS','XDB','ANONYMOUS','XS\$NULL','ORDDATA','ORDPLUGINS','SI_INFORMTN_SCHEMA','MDSYS','ORACLE_OCM', 'DIP', 'ORACLE_MAINT', 'GSMADMIN_INTERNAL', 'GSMCATUSER', 'GGSYS', 'SYSBACKUP', 'SYSDG', 'SYSKM', 'SYSMAC', 'C##DIV', 'AUDSYS')
+WHERE $(ora_excl_ctx "username")
 ORDER BY username;
 EXIT;
 EOF
@@ -2024,7 +2156,7 @@ connect $conn_str
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 100
 $PDB_SWITCH_SQL
 SELECT username FROM dba_users${DBLINK_SUFFIX} 
-WHERE username NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','WMSYS','XDB','ANONYMOUS','XS\$NULL','ORDDATA','ORDPLUGINS','SI_INFORMTN_SCHEMA','MDSYS','ORACLE_OCM', 'DIP', 'ORACLE_MAINT', 'GSMADMIN_INTERNAL', 'GSMCATUSER', 'GGSYS', 'SYSBACKUP', 'SYSDG', 'SYSKM', 'SYSMAC', 'C##DIV', 'AUDSYS')
+WHERE $(ora_excl_ctx "username")
 ORDER BY username;
 EXIT;
 EOF
@@ -2051,7 +2183,7 @@ EOF
             selected_schemas=""
 
             for sch_item in $sch_input_cleaned; do
-                sch_item_upper=$(echo "$sch_item" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+                sch_item_upper=$(echo "$sch_item" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
                 if echo "$sch_item_upper" | grep -qE '^[0-9]+-[0-9]+$'; then
                     r_start=$(echo "$sch_item_upper" | cut -d'-' -f1)
                     r_end=$(echo "$sch_item_upper" | cut -d'-' -f2)
@@ -2079,7 +2211,7 @@ EOF
             if [ -n "$selected_schemas" ]; then
                 where_clause="WHERE t.owner IN ($selected_schemas)"
             else
-                where_clause="WHERE t.owner NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','WMSYS','XDB','ANONYMOUS','XS\$NULL','ORDDATA','ORDPLUGINS','SI_INFORMTN_SCHEMA','MDSYS','ORACLE_OCM')"
+                where_clause="WHERE $(ora_excl_ctx "t.owner")"
             fi
             
             if [ "$LANG_PREF" = "EN" ]; then echo "  >> Fetching Table list and calculating sizes..."
@@ -2208,7 +2340,7 @@ EOF
         echo "  [무인모드] 대상 선택값이 없어 ALL 로 처리합니다."
         choices="ALL"
     fi
-    choices_upper=$(echo "$choices" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+    choices_upper=$(echo "$choices" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
     if [ "$choices_upper" = "ALL" ]; then
         selected_items=""
         i=1
@@ -2263,7 +2395,7 @@ EOF
                     fi
                     ;;
                 *)
-                    item_val=$(echo "$ch" | tr 'a-z' 'A-Z')
+                    item_val=$(echo "$ch" | tr '[:lower:]' '[:upper:]')
                     if [ -z "$selected_items" ]; then
                         selected_items="$item_val"
                     else
@@ -2320,6 +2452,7 @@ EOF
     else
         cat <<EOF > "$1"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -2373,6 +2506,56 @@ gen_sql_append_checked() {
     return 0
 }
 
+# ------------------------------------------------------------------------------
+# [v09.04.00] (개선9) 덤프 암호화 파라미터 결정
+#   pick_encryption_param <패스워드>  -> TDE_PARAM 설정
+#   12c 이상에서는 par 파일에 패스워드를 평문으로 남기지 않도록 ENCRYPTION_PWD_PROMPT=YES
+#   (실행 시 Data Pump 가 직접 물어봄)를 고를 수 있다. 무인 파이프라인은 입력할 사람이
+#   없으므로 기본값은 대화형이면 Y, 무인 실행이면 N(par 에 기록, 권한 600) 이다.
+# ------------------------------------------------------------------------------
+pick_encryption_param() {
+    TDE_PARAM=""
+    [ -z "$1" ] && return 0
+    case "$1" in *'"'*) echo "  [오류] 덤프 암호화 패스워드에 큰따옴표(\")는 쓸 수 없습니다."; return 1 ;; esac
+    _pe_major=$(echo "$DB_VERSION" | cut -d'.' -f1 | tr -dc '0-9')
+    if [ -n "$_pe_major" ] && [ "$_pe_major" -ge 12 ]; then
+        if [ "$LANG_PREF" = "EN" ]; then printf "  Prompt for the password at run time instead of storing it in the par file (ENCRYPTION_PWD_PROMPT=YES)? (Y/n): "
+        else printf "  par 파일에 저장하지 않고 실행 시 입력받겠습니까 (ENCRYPTION_PWD_PROMPT=YES)? 무인 파이프라인이면 n (Y/n): "; fi
+        _read enc_prompt_opt
+        if [ -z "$enc_prompt_opt" ]; then
+            if [ "$UNATTENDED" = "true" ]; then enc_prompt_opt="n"; else enc_prompt_opt="y"; fi
+        fi
+        case "$enc_prompt_opt" in
+            y|Y) TDE_PARAM="ENCRYPTION_PWD_PROMPT=YES"; return 0 ;;
+        esac
+    fi
+    TDE_PARAM="ENCRYPTION_PASSWORD=\"$1\""
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# [v09.04.00] (개선8) DIRECTORY 권한
+#   예전에는 GRANT READ, WRITE ON DIRECTORY ... TO PUBLIC 이라 DB 의 모든 계정이 덤프
+#   디렉터리의 파일(업무 데이터 전체)을 읽고 덮어쓸 수 있었다. 디렉터리를 만든 계정은
+#   이미 권한을 가지므로, Data Pump 를 다른 계정(PDB 접속 계정 등)으로 돌릴 때만 그
+#   계정에 준다. (자기 자신에게 GRANT 하면 ORA-01749)
+# ------------------------------------------------------------------------------
+conn_user() {
+    _cu=$(echo "$1" | awk '{print $1}' | cut -d'/' -f1 | cut -d'@' -f1 | tr -d '"' | tr '[:lower:]' '[:upper:]')
+    [ -z "$_cu" ] && _cu="SYS"
+    echo "$_cu"
+}
+dir_grant_sql() {
+    [ -z "$GRANT_DIR_SQL" ] && return 0
+    _dg_creator=$(conn_user "$DB_CONN")
+    _dg_dp=$(conn_user "${PDB_CONNECT_STR:-$DB_CONN}")
+    if [ "$_dg_dp" != "$_dg_creator" ] && [ "$_dg_dp" != "SYS" ]; then
+        echo "GRANT READ, WRITE ON DIRECTORY $DIR_OBJ_NAME TO \"$_dg_dp\";"
+    fi
+    return 0
+}
+
+
 generate_target_env_ddl() {
     # [NEW v08.03] 함수 스크래치 변수 지역화 — 메뉴 재진입/함수 간 값 누수 차단
     # [v09.02] local 제거 (ksh 비호환): _tgt_in_clause
@@ -2380,14 +2563,39 @@ generate_target_env_ddl() {
     if [ "$LANG_PREF" = "EN" ]; then echo "  [Target Environment Setup DDL Generator]"
     else echo "  [Target DB 사전 환경 구축 DDL 생성 모듈]"; fi
     
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Generate Target User & Tablespace creation DDL (00_create_target_env_${UNIQUE_ID}.sql)? (Y/n) [Default: Y]: "
-    else printf "  Target DB 사전 적용용 계정/테이블스페이스 DDL 생성 (00_create_target_env_${UNIQUE_ID}.sql)? (Y/n) [기본값: Y]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Generate Target User & Tablespace creation DDL (00_create_target_env_%s.sql)? (Y/n) [Default: Y]: " "${UNIQUE_ID}"
+    else printf "  Target DB 사전 적용용 계정/테이블스페이스 DDL 생성 (00_create_target_env_%s.sql)? (Y/n) [기본값: Y]: " "${UNIQUE_ID}"; fi
     _read gen_env_opt
     if [ -z "$gen_env_opt" ] || [ "$gen_env_opt" = "y" ] || [ "$gen_env_opt" = "Y" ]; then
-        if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Target DB Datafile Storage Directory [Default: %s]: " "$DIR_PHYSICAL_PATH"
-        else printf "  Target DB 데이터파일(Datafile) 저장 디렉토리 경로 입력 [기본값: %s]: " "$DIR_PHYSICAL_PATH"; fi
+        # [v09.04.00] (개선8) 예전 기본값은 덤프 디렉터리였다. 데이터파일이 덤프와 같은 곳에
+        #   만들어져 덤프 정리 때 함께 지워지거나 공간을 다투었다.
+        #   기본값: Target 에서 생성 중(DB Link 사용)이면 Target 의 db_create_file_dest(OMF)
+        #           또는 SYSTEM 데이터파일 디렉터리, Source 에서 생성 중이면 OMF.
+        #   입력값: OMF(파일명 생략) / +DISKGROUP(ASM) / 디렉터리 경로
+        _df_default="OMF"
+        if [ -n "$DBLINK_SUFFIX" ] && [ "$MOCK_MODE" != "true" ]; then
+            _df_q=$(sql_query_text "SELECT 'VAL:' || NVL((SELECT 'OMF' FROM v\$parameter WHERE name = 'db_create_file_dest' AND value IS NOT NULL),
+                     (SELECT SUBSTR(file_name, 1, INSTR(file_name, '/', -1) - 1) FROM dba_data_files
+                       WHERE tablespace_name = 'SYSTEM' AND ROWNUM = 1)) FROM dual;")
+            case "$_df_q" in +*) _df_q="+$(echo "$_df_q" | cut -c2- | cut -d'/' -f1)" ;; esac
+            [ -n "$_df_q" ] && _df_default="$_df_q"
+        fi
+        if [ "$LANG_PREF" = "EN" ]; then printf "  Target datafile location (OMF / +DISKGROUP / directory) [Default: %s]: " "$_df_default"
+        else printf "  Target 데이터파일 위치 (OMF / +디스크그룹 / 디렉터리 경로) [기본값: %s]: " "$_df_default"; fi
         _read user_df_dir
-        [ -z "$user_df_dir" ] && user_df_dir="$DIR_PHYSICAL_PATH"
+        [ -z "$user_df_dir" ] && user_df_dir="$_df_default"
+        user_df_dir=$(echo "$user_df_dir" | sed -e 's#/*$##' -e "s/'//g")
+        case "$user_df_dir" in
+            [Oo][Mm][Ff])
+                _df_sel="' DATAFILE SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;'"
+                _df_users="DATAFILE SIZE 100M"; _df_tsdata="DATAFILE SIZE 500M" ;;
+            +*)
+                _df_sel="' DATAFILE ''${user_df_dir}'' SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;'"
+                _df_users="DATAFILE '${user_df_dir}' SIZE 100M"; _df_tsdata="DATAFILE '${user_df_dir}' SIZE 500M" ;;
+            *)
+                _df_sel="' DATAFILE ''${user_df_dir}/' || LOWER(t.tablespace_name) || '01.dbf'' SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;'"
+                _df_users="DATAFILE '${user_df_dir}/users01.dbf' SIZE 100M"; _df_tsdata="DATAFILE '${user_df_dir}/ts_data01.dbf' SIZE 500M" ;;
+        esac
 
         ENV_SQL="00_create_target_env_${UNIQUE_ID}.sql"
         ENV_SH="00_create_target_env_${UNIQUE_ID}.sh"
@@ -2400,7 +2608,7 @@ generate_target_env_ddl() {
 --  [v09.03.01] 이 파일에는 계정 비밀번호 해시(IDENTIFIED BY VALUES)가 들어갈 수
 --  있습니다 (권한 600). 공유하지 말고 사용 후 삭제하십시오.
 -- ==============================================================================
-SET ECHO ON LOGONLY
+SET ECHO ON
 SET SERVEROUTPUT ON SIZE UNLIMITED
 SPOOL 00_create_target_env_${UNIQUE_ID}.log
 
@@ -2421,8 +2629,8 @@ EOF
             # [FIX v09.03.01] (B5) MOCK 생성물도 실제 경로와 같은 형태로 만든다.
             #   (해시를 가져온 경우 / 못 가져와 임의 비밀번호 + 잠금으로 만드는 경우)
             cat <<EOF >> "$ENV_SQL"
-CREATE TABLESPACE USERS DATAFILE '${user_df_dir}/users01.dbf' SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
-CREATE BIGFILE TABLESPACE TS_DATA DATAFILE '${user_df_dir}/ts_data01.dbf' SIZE 500M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
+CREATE TABLESPACE USERS ${_df_users} AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
+CREATE BIGFILE TABLESPACE TS_DATA ${_df_tsdata} AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
 
 PROMPT ========================================================================
 PROMPT 2. Creating Database Users (original password hash preserved when available)
@@ -2469,18 +2677,18 @@ EOF
             IFS=$IFS_BACKUP
 
             _tbs_where_clause="WHERE t.tablespace_name NOT IN ('SYSTEM','SYSAUX','TEMP','UNDOTBS1','UNDOTBS2','USERS')"
-            _usr_where_clause="WHERE username NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','WMSYS','XDB','ANONYMOUS','XS\$NULL','ORDDATA','ORDPLUGINS','SI_INFORMTN_SCHEMA','MDSYS','ORACLE_OCM', 'DIP', 'ORACLE_MAINT', 'GSMADMIN_INTERNAL', 'GSMCATUSER', 'GGSYS', 'SYSBACKUP', 'SYSDG', 'SYSKM', 'SYSMAC', 'AUDSYS')"
+            _usr_where_clause="WHERE $(ora_excl_ctx "username")"
 
             if [ -n "$_tgt_in_clause" ] && [ "$MIG_TYPE" != "FULL" ]; then
                 if [ "$MIG_TYPE" = "SCHEMA" ]; then
                     _tbs_where_clause="WHERE t.tablespace_name IN (SELECT default_tablespace FROM dba_users${DBLINK_SUFFIX} WHERE username IN ($_tgt_in_clause) UNION SELECT tablespace_name FROM dba_segments${DBLINK_SUFFIX} WHERE owner IN ($_tgt_in_clause)) AND t.tablespace_name NOT IN ('SYSTEM','SYSAUX','TEMP','UNDOTBS1','UNDOTBS2','USERS')"
-                    _usr_where_clause="WHERE username IN ($_tgt_in_clause) AND username NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','WMSYS','XDB','ANONYMOUS','XS\$NULL','ORDDATA','ORDPLUGINS','SI_INFORMTN_SCHEMA','MDSYS','ORACLE_OCM', 'DIP', 'ORACLE_MAINT', 'GSMADMIN_INTERNAL', 'GSMCATUSER', 'GGSYS', 'SYSBACKUP', 'SYSDG', 'SYSKM', 'SYSMAC', 'AUDSYS')"
+                    _usr_where_clause="WHERE username IN ($_tgt_in_clause) AND $(ora_excl_ctx "username")"
                 elif [ "$MIG_TYPE" = "TABLE" ]; then
                     _tbs_where_clause="WHERE t.tablespace_name IN (SELECT tablespace_name FROM dba_tables${DBLINK_SUFFIX} WHERE owner || '.' || table_name IN ($_tgt_in_clause) UNION SELECT tablespace_name FROM dba_segments${DBLINK_SUFFIX} WHERE owner || '.' || segment_name IN ($_tgt_in_clause)) AND t.tablespace_name NOT IN ('SYSTEM','SYSAUX','TEMP','UNDOTBS1','UNDOTBS2','USERS')"
-                    _usr_where_clause="WHERE username IN (SELECT owner FROM dba_tables${DBLINK_SUFFIX} WHERE owner || '.' || table_name IN ($_tgt_in_clause)) AND username NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','WMSYS','XDB','ANONYMOUS','XS\$NULL','ORDDATA','ORDPLUGINS','SI_INFORMTN_SCHEMA','MDSYS','ORACLE_OCM', 'DIP', 'ORACLE_MAINT', 'GSMADMIN_INTERNAL', 'GSMCATUSER', 'GGSYS', 'SYSBACKUP', 'SYSDG', 'SYSKM', 'SYSMAC', 'AUDSYS')"
+                    _usr_where_clause="WHERE username IN (SELECT owner FROM dba_tables${DBLINK_SUFFIX} WHERE owner || '.' || table_name IN ($_tgt_in_clause)) AND $(ora_excl_ctx "username")"
                 elif [ "$MIG_TYPE" = "TABLESPACE" ]; then
                     _tbs_where_clause="WHERE t.tablespace_name IN ($_tgt_in_clause) AND t.tablespace_name NOT IN ('SYSTEM','SYSAUX','TEMP','UNDOTBS1','UNDOTBS2','USERS')"
-                    _usr_where_clause="WHERE username IN (SELECT owner FROM dba_segments${DBLINK_SUFFIX} WHERE tablespace_name IN ($_tgt_in_clause)) AND username NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','WMSYS','XDB','ANONYMOUS','XS\$NULL','ORDDATA','ORDPLUGINS','SI_INFORMTN_SCHEMA','MDSYS','ORACLE_OCM', 'DIP', 'ORACLE_MAINT', 'GSMADMIN_INTERNAL', 'GSMCATUSER', 'GGSYS', 'SYSBACKUP', 'SYSDG', 'SYSKM', 'SYSMAC', 'AUDSYS')"
+                    _usr_where_clause="WHERE username IN (SELECT owner FROM dba_segments${DBLINK_SUFFIX} WHERE tablespace_name IN ($_tgt_in_clause)) AND $(ora_excl_ctx "username")"
                 fi
             fi
 
@@ -2508,7 +2716,7 @@ connect $DB_CONN
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 500 TRIMSPOOL ON
 $PDB_SWITCH_SQL
 SELECT 'CREATE ' || CASE WHEN NVL(t.bigfile, 'NO') = 'YES' OR NVL(s.total_mb, 0) >= 30720 THEN 'BIGFILE ' ELSE '' END ||
-       'TABLESPACE ' || t.tablespace_name || ' DATAFILE ''' || '$user_df_dir/' || LOWER(t.tablespace_name) || '01.dbf'' SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;'
+       'TABLESPACE ' || t.tablespace_name || ${_df_sel}
 FROM dba_tablespaces${DBLINK_SUFFIX} t
 LEFT JOIN (SELECT tablespace_name, SUM(bytes)/1024/1024 as total_mb FROM dba_data_files${DBLINK_SUFFIX} GROUP BY tablespace_name) s
   ON t.tablespace_name = s.tablespace_name
@@ -2620,8 +2828,8 @@ generate_grants_and_synonyms_scripts() {
     if [ "$LANG_PREF" = "EN" ]; then echo "  [Dependency Capture: Public Synonyms & Cross-Schema Grants DDL]"
     else echo "  [의존성 분리 캡처: Public Synonym 및 타 계정 부여 객체권한(Grants) DDL 생성 모듈]"; fi
 
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Generate Post-Migration Grants & Synonyms DDL (99_post_grants_synonyms_${UNIQUE_ID}.sql)? (Y/n) [Default: Y]: "
-    else printf "  후행 적용용 권한(Grants) 및 Public Synonym DDL 생성 (99_post_grants_synonyms_${UNIQUE_ID}.sql)? (Y/n) [기본값: Y]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Generate Post-Migration Grants & Synonyms DDL (99_post_grants_synonyms_%s.sql)? (Y/n) [Default: Y]: " "${UNIQUE_ID}"
+    else printf "  후행 적용용 권한(Grants) 및 Public Synonym DDL 생성 (99_post_grants_synonyms_%s.sql)? (Y/n) [기본값: Y]: " "${UNIQUE_ID}"; fi
     _read gen_dep_opt
     if [ -z "$gen_dep_opt" ] || [ "$gen_dep_opt" = "y" ] || [ "$gen_dep_opt" = "Y" ]; then
         DEP_SQL="99_post_grants_synonyms_${UNIQUE_ID}.sql"
@@ -2681,18 +2889,18 @@ EOF
             IFS=$IFS_BACKUP
 
             _syn_where="WHERE owner = 'PUBLIC'"
-            _tab_priv_where="WHERE grantee NOT IN ('SYS','SYSTEM','XDB','WMSYS','MDSYS','ORDDATA','CTXSYS','AUDSYS','DBSNMP')"
-            _role_priv_where="WHERE grantee NOT IN ('SYS','SYSTEM')"
+            _tab_priv_where="WHERE $(ora_excl_ctx "grantee")"
+            _role_priv_where="WHERE $(ora_excl_ctx "grantee")"
 
             if [ -n "$_dep_in_clause" ] && [ "$MIG_TYPE" != "FULL" ]; then
                 if [ "$MIG_TYPE" = "SCHEMA" ]; then
                     _syn_where="WHERE owner = 'PUBLIC' AND table_owner IN ($_dep_in_clause)"
-                    _tab_priv_where="WHERE owner IN ($_dep_in_clause) AND grantee NOT IN ('SYS','SYSTEM','XDB','WMSYS','MDSYS','ORDDATA','CTXSYS','AUDSYS','DBSNMP')"
-                    _role_priv_where="WHERE grantee IN ($_dep_in_clause) AND grantee NOT IN ('SYS','SYSTEM')"
+                    _tab_priv_where="WHERE owner IN ($_dep_in_clause) AND $(ora_excl_ctx "grantee")"
+                    _role_priv_where="WHERE grantee IN ($_dep_in_clause) AND $(ora_excl_ctx "grantee")"
                 elif [ "$MIG_TYPE" = "TABLE" ]; then
                     _syn_where="WHERE owner = 'PUBLIC' AND table_owner || '.' || table_name IN ($_dep_in_clause)"
-                    _tab_priv_where="WHERE owner || '.' || table_name IN ($_dep_in_clause) AND grantee NOT IN ('SYS','SYSTEM','XDB','WMSYS','MDSYS','ORDDATA','CTXSYS','AUDSYS','DBSNMP')"
-                    _role_priv_where="WHERE grantee IN (SELECT owner FROM dba_tables${DBLINK_SUFFIX} WHERE owner || '.' || table_name IN ($_dep_in_clause)) AND grantee NOT IN ('SYS','SYSTEM')"
+                    _tab_priv_where="WHERE owner || '.' || table_name IN ($_dep_in_clause) AND $(ora_excl_ctx "grantee")"
+                    _role_priv_where="WHERE grantee IN (SELECT owner FROM dba_tables${DBLINK_SUFFIX} WHERE owner || '.' || table_name IN ($_dep_in_clause)) AND $(ora_excl_ctx "grantee")"
                 fi
             fi
 
@@ -2797,6 +3005,9 @@ generate_checksum_scripts() {
 
     cat <<EOF > "$CHK_CREATE_SH"
 #!/bin/bash
+# [v09.04.00] 인자로 받은 경로가 상대경로면 cd 전에 절대경로로 바꾼다
+case "\${1:-}" in ""|/*) : ;; *) set -- "\$(pwd)/\$1" ;; esac
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  Dump File MD5 Checksum Manifest Generator
 #  Job ID    : ${UNIQUE_ID}
@@ -2860,6 +3071,9 @@ EOF
 
     cat <<EOF > "$CHK_VERIFY_SH"
 #!/bin/bash
+# [v09.04.00] 인자로 받은 경로가 상대경로면 cd 전에 절대경로로 바꾼다
+case "\${1:-}" in ""|/*) : ;; *) set -- "\$(pwd)/\$1" ;; esac
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  Dump File MD5 Integrity Verifier (Target Server)
 #  Job ID    : ${UNIQUE_ID}
@@ -2939,6 +3153,7 @@ generate_monitoring_and_stop_scripts() {
 
     cat <<EOF > "$MON_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -2980,6 +3195,7 @@ EOF
 
     cat <<EOF > "$STOP_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -3027,6 +3243,7 @@ generate_master_runner_script() {
 
     cat <<EOF > "$MASTER_RUNNER_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  Oracle Datapump Master Pipeline Orchestrator (${_runner_role})
 #  Job ID  : ${UNIQUE_ID}
@@ -3092,12 +3309,13 @@ log_msg() {
     echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" | tee -a "\$MASTER_LOG"
 }
 
+# [v09.04.00] (개선6) 파일명의 . 이 정규식으로 해석되지 않게 고정 문자열(-F)로 비교
 is_done() {
-    grep -qx "DONE:\$1" "\$STATE_FILE" 2>/dev/null
+    grep -qxF "DONE:\$1" "\$STATE_FILE" 2>/dev/null
 }
 
 mark_done() {
-    grep -qx "DONE:\$1" "\$STATE_FILE" 2>/dev/null || echo "DONE:\$1" >> "\$STATE_FILE"
+    grep -qxF "DONE:\$1" "\$STATE_FILE" 2>/dev/null || echo "DONE:\$1" >> "\$STATE_FILE"
 }
 
 total_steps=0
@@ -3170,8 +3388,19 @@ for s_file in \$STEP_LIST; do
 
     _attempt=1
     step_rc=1
-    while [ \$_attempt -le \$MAX_RETRY ]; do
-        [ \$_attempt -gt 1 ] && log_msg ">> [RETRY \$_attempt/\$MAX_RETRY] \$s_file"
+    # [v09.04.00] (개선6) 데이터를 넣는 스텝(impdp / DB Link 복사)은 자동 재시도하지 않는다.
+    #   APPEND 적재가 중간에 실패한 뒤 다시 돌면 이미 들어간 행이 한 번 더 들어간다.
+    #   expdp 도 같은 덤프 파일명으로 재시작하면 ORA-27038(파일 존재)로 실패하므로 제외.
+    _max_try=\$MAX_RETRY
+    case "\$s_file" in
+        impdp_*|expdp_*|dblink_1_copy_*)
+            if [ "\$MAX_RETRY" -gt 1 ]; then
+                log_msg ">> [INFO] \$s_file : 데이터 적재/추출 스텝은 자동 재시도하지 않습니다 (중복 적재 방지)"
+            fi
+            _max_try=1 ;;
+    esac
+    while [ \$_attempt -le \$_max_try ]; do
+        [ \$_attempt -gt 1 ] && log_msg ">> [RETRY \$_attempt/\$_max_try] \$s_file"
         step_start=\$(date +%s 2>/dev/null || echo 0)
 
         # [FIX v07/B5] v06 은 'sh step | tee' 형태라 \$? 가 tee 의 종료코드였고,
@@ -3189,7 +3418,7 @@ for s_file in \$STEP_LIST; do
         [ \$step_rc -eq 0 ] && break
         [ \$step_rc -eq \$RC_USER_SKIPPED ] && break
         _attempt=\$((_attempt + 1))
-        [ \$_attempt -le \$MAX_RETRY ] && sleep 5
+        [ \$_attempt -le \$_max_try ] && sleep 5
     done
 
     if [ \$step_rc -eq 0 ]; then
@@ -3287,12 +3516,20 @@ estimate_target_size_bytes() {
     done
     IFS=$IFS_BACKUP
 
-    _es_where="WHERE owner NOT IN ('SYS','SYSTEM','XDB','WMSYS','AUDSYS','OUTLN','DBSNMP')"
+    # [v09.04.00] (개선12) 덤프 크기 추정
+    #   - 인덱스 세그먼트는 덤프에 DDL 만 들어가므로 합계에서 뺀다 (예전에는 SCHEMA/FULL
+    #     에서 인덱스까지 더해 과대 추정).
+    #   - TABLE 모드는 세그먼트명이 테이블명인 것만 더해 LOB 세그먼트(SYS_LOB...)가 빠졌다.
+    #     LOB 이 큰 테이블은 크게 과소 추정되어 디스크 부족 경고가 나오지 않았다.
+    _es_types="segment_type NOT IN ('INDEX', 'INDEX PARTITION', 'INDEX SUBPARTITION', 'LOBINDEX', 'ROLLBACK', 'TYPE2 UNDO', 'TEMPORARY')"
+    _es_where="WHERE $(ora_excl_ctx "owner") AND ${_es_types}"
     if [ -n "$_es_in" ]; then
         case "$MIG_TYPE" in
-            SCHEMA)     _es_where="WHERE owner IN ($_es_in)" ;;
-            TABLE)      _es_where="WHERE owner || '.' || segment_name IN ($_es_in)" ;;
-            TABLESPACE) _es_where="WHERE tablespace_name IN ($_es_in)" ;;
+            SCHEMA)     _es_where="WHERE owner IN ($_es_in) AND ${_es_types}" ;;
+            TABLE)      _es_where="WHERE ${_es_types} AND (owner || '.' || segment_name IN ($_es_in)
+                          OR (owner, segment_name) IN (SELECT owner, segment_name FROM dba_lobs${DBLINK_SUFFIX}
+                                                        WHERE owner || '.' || table_name IN ($_es_in)))" ;;
+            TABLESPACE) _es_where="WHERE tablespace_name IN ($_es_in) AND ${_es_types}" ;;
         esac
     fi
 
@@ -3354,20 +3591,42 @@ check_version_compatibility() {
 }
 
 # 문자셋 확장(싱글바이트/EUC -> AL32UTF8) 위험 판정
+#   [FIX v09.04.00] (B23) US7ASCII 는 ASCII 가 AL32UTF8 에서도 1바이트라 늘어나지 않는다.
+#     위험은 "확장" 이 아니라 pass-through 로 넣은 8비트 데이터가 깨지는 것이므로 따로
+#     안내한다. 2바이트 문자셋(KO16/ZHS16/JA16)은 문자당 2 -> 3바이트(최대 1.5배),
+#     싱글바이트 서유럽 문자셋은 1 -> 2~3바이트로 늘어난다.
+#   CHARSET_RISK_MSG 에 사전 검증 기록용 문구를 남긴다.
+CHARSET_RISK_MSG=""
 check_charset_risk() {
+    CHARSET_RISK_MSG=""
     case "$DB_CHARSET" in
-        KO16MSWIN949|KO16KSC5601|WE8MSWIN1252|WE8ISO8859P1|US7ASCII|ZHS16GBK|JA16SJIS)
+        US7ASCII)
+            CHARSET_RISK_MSG="US7ASCII -> AL32UTF8: 확장 없음. 단 pass-through 8비트 데이터는 손상 (DMU 점검)"
             if [ "$LANG_PREF" = "EN" ]; then
-                echo "  [WARN] Source charset ${DB_CHARSET} -> AL32UTF8 can expand up to 3x (ORA-12899 risk)."
-                echo "         Run menu 5 (DIAGNOSTICS) to list columns at risk before migrating."
+                echo "  [WARN] US7ASCII: ASCII does not expand in AL32UTF8, but 8-bit data stored by"
+                echo "         pass-through (e.g. Korean) is lost on conversion. Scan with Oracle DMU."
             else
-                echo "  [경고] Source 문자셋 ${DB_CHARSET} -> AL32UTF8 변환 시 최대 3배 확장 (ORA-12899 위험)."
-                echo "         이관 전 메뉴 5(DIAGNOSTICS)로 위험 컬럼 목록을 먼저 확인하십시오."
+                echo "  [경고] US7ASCII: ASCII 는 AL32UTF8 에서도 늘어나지 않지만, pass-through 로 넣은"
+                echo "         8비트 데이터(한글 등)는 변환 시 깨집니다. Oracle DMU 로 먼저 점검하십시오."
             fi
             return 1
             ;;
+        KO16MSWIN949|KO16KSC5601|ZHS16GBK|JA16SJIS|JA16EUC|ZHT16MSWIN950|ZHT16BIG5)
+            CHARSET_RISK_MSG="${DB_CHARSET} -> AL32UTF8: 2바이트 문자가 3바이트로 (최대 1.5배, ORA-12899 위험)"
+            ;;
+        WE8MSWIN1252|WE8ISO8859P1|WE8ISO8859P15|EE8MSWIN1250|CL8MSWIN1251|EL8MSWIN1253)
+            CHARSET_RISK_MSG="${DB_CHARSET} -> AL32UTF8: 비ASCII 1바이트 문자가 2~3바이트로 (ORA-12899 위험)"
+            ;;
+        *) return 0 ;;
     esac
-    return 0
+    if [ "$LANG_PREF" = "EN" ]; then
+        echo "  [WARN] Source charset ${DB_CHARSET} -> AL32UTF8 expands non-ASCII characters (ORA-12899 risk)."
+        echo "         Run menu 5 (DIAGNOSTICS) to measure the columns that will overflow."
+    else
+        echo "  [경고] ${CHARSET_RISK_MSG}"
+        echo "         이관 전 메뉴 5(DIAGNOSTICS)로 실제로 넘치는 컬럼을 측정하십시오."
+    fi
+    return 1
 }
 
 # [NEW v08.03] 사전 검증 결과를 HTML 리포트용으로 기록
@@ -3663,7 +3922,7 @@ run_preflight_checks() {
     # 5) 문자셋 확장 위험
     if ! check_charset_risk; then
         _pf_warn=$((_pf_warn + 1))
-        pf_record "CHARSET" "문자셋 확장 위험" "WARN" "${DB_CHARSET} -> AL32UTF8 최대 3배 확장 (ORA-12899 위험)"
+        pf_record "CHARSET" "문자셋 확장 위험" "WARN" "${CHARSET_RISK_MSG}"
     else
         echo "   [ OK ] 문자셋 : ${DB_CHARSET}"
         pf_record "CHARSET" "문자셋 확장 위험" "OK" "${DB_CHARSET}"
@@ -3763,7 +4022,7 @@ run_source_mode() {
         else printf "  사용하거나 새로 생성할 Database Link 이름을 입력하세요 [기본값: MIG_LINK]: "; fi
         _read DBLINK_NAME
         [ -z "$DBLINK_NAME" ] && DBLINK_NAME="MIG_LINK"
-        DBLINK_NAME=$(echo "$DBLINK_NAME" | tr 'a-z' 'A-Z')
+        DBLINK_NAME=$(echo "$DBLINK_NAME" | tr '[:lower:]' '[:upper:]')
 
         if [ "$MOCK_MODE" != "true" ]; then
             # [FIX v09.03.02] (B11/B15) 공통 함수로 확인. 조회 실패면 추측하지 않고 멈춘다.
@@ -3830,17 +4089,23 @@ run_source_mode() {
     case "$mig_mode" in
         1)
             MIG_TYPE="SCHEMA"
-            if select_migration_targets "SCHEMA" "$DB_CONN"; then SCHEMAS_LIST="$SELECTED_LIST"; else _read SCHEMAS_LIST; SCHEMAS_LIST=$(normalize_list "$SCHEMAS_LIST"); fi
+            if select_migration_targets "SCHEMA" "$DB_CONN"; then SCHEMAS_LIST="$SELECTED_LIST"; else manual_target_prompt "SCHEMA"; _read SCHEMAS_LIST; fi
+            # [FIX v09.04.00] (B26) 목록에서 고른 경우도 구분자를 통일한다.
+            SCHEMAS_LIST=$(normalize_list "$SCHEMAS_LIST")
             MIG_PARAMS="SCHEMAS=$SCHEMAS_LIST"
             ;;
         2)
             MIG_TYPE="TABLE"
-            if select_migration_targets "TABLE" "$DB_CONN"; then TABLES_LIST="$SELECTED_LIST"; else _read TABLES_LIST; fi
+            # [FIX v09.04.00] (B26) 수동 입력에도 normalize_list 를 적용한다 (v08.04 수정이
+            #   SCHEMA 에만 들어가 있어 "HR.EMP HR.DEPT" 같은 입력이 깨졌다).
+            if select_migration_targets "TABLE" "$DB_CONN"; then TABLES_LIST="$SELECTED_LIST"; else manual_target_prompt "TABLE"; _read TABLES_LIST; fi
+            TABLES_LIST=$(normalize_list "$TABLES_LIST")
             MIG_PARAMS="TABLES=$TABLES_LIST"
             ;;
         3)
             MIG_TYPE="TABLESPACE"
-            if select_migration_targets "TABLESPACE" "$DB_CONN"; then TBS_LIST="$SELECTED_LIST"; else _read TBS_LIST; fi
+            if select_migration_targets "TABLESPACE" "$DB_CONN"; then TBS_LIST="$SELECTED_LIST"; else manual_target_prompt "TABLESPACE"; _read TBS_LIST; fi
+            TBS_LIST=$(normalize_list "$TBS_LIST")
             MIG_PARAMS="TABLESPACES=$TBS_LIST"
             ;;
         4)
@@ -3851,6 +4116,14 @@ run_source_mode() {
             echo "  [오류/ERROR] 올바르지 않은 선택입니다."
             return 1
             ;;
+    esac
+
+    # [FIX v09.04.00] (B28) 대상이 비면 "SCHEMAS=" 처럼 빈 par 가 만들어졌다. 여기서 멈춘다.
+    case "$MIG_PARAMS" in
+        *=)
+            if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] No migration target selected. Nothing was generated."
+            else echo "  [오류] 선택된 이관 대상이 없습니다. 스크립트를 생성하지 않습니다."; fi
+            return 1 ;;
     esac
 
     setup_db_directory || return 1
@@ -3990,13 +4263,21 @@ CONNECT_EOF
     fi
 
     echo "----------------------------------------------------------------------"
-    if [ "$LANG_PREF" = "EN" ]; then printf "  [Security] Enter TDE Encryption Password (leave empty if not using TDE): "
-    else printf "  [보안 검토] DB에 암호화(TDE)가 적용되어 있습니까? 패스워드를 입력하세요 (입력 숨김, 미사용 시 엔터): "; fi
-    _read_secret tde_pwd MIG_TDE_PASSWORD
-    TDE_PARAM=""
-    if [ -n "$tde_pwd" ]; then
-        TDE_PARAM="ENCRYPTION_PASSWORD=\"$tde_pwd\""
+    # [v09.04.00] (개선9) 용어 바로잡기: ENCRYPTION_PASSWORD 는 TDE 지갑(wallet) 패스워드가
+    #   아니라 "덤프 파일을 암호화할 패스워드" 다. 지정하면 expdp 가 ENCRYPTION=ALL 로 덤프를
+    #   암호화하며, 이는 Advanced Security Option 라이선스 대상이다. TDE 컬럼/테이블스페이스가
+    #   있는 DB 에서 이 값을 비우면 해당 데이터가 덤프에 평문으로 기록된다(ORA-39173 경고).
+    if [ "$LANG_PREF" = "EN" ]; then
+        echo "  [Dump Encryption] ENCRYPTION_PASSWORD encrypts the dump files (NOT the TDE wallet password)."
+        echo "                    Requires the Advanced Security Option license. Recommended if TDE is in use."
+        printf "  Dump encryption password (hidden, Enter = no encryption): "
+    else
+        echo "  [덤프 암호화] ENCRYPTION_PASSWORD 는 덤프 파일 암호화용 패스워드입니다 (TDE 지갑 패스워드 아님)."
+        echo "               Advanced Security Option 라이선스가 필요합니다. TDE 를 쓰는 DB 라면 지정을 권장합니다."
+        printf "  덤프 암호화 패스워드 (입력 숨김, 미사용 시 엔터): "
     fi
+    _read_secret tde_pwd MIG_TDE_PASSWORD
+    pick_encryption_param "$tde_pwd" || return 1
 
     # 데이터 서브세팅 (QUERY / SAMPLE 필터)
     echo "----------------------------------------------------------------------"
@@ -4073,6 +4354,7 @@ EOF
 
     cat <<EOF > "$META_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -4083,8 +4365,8 @@ EOF
         cat <<EOF >> "$META_SH"
 sqlplus -S /nolog <<SQL_EOF
 connect $(hd_esc "$DB_CONN")
-$CREATE_DIR_SQL
-$GRANT_DIR_SQL
+$(hd_esc "$CREATE_DIR_SQL")
+$(dir_grant_sql)
 EXIT;
 SQL_EOF
 
@@ -4211,6 +4493,7 @@ EOF
 
         cat <<EOF > "$_exp_est_sh"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -4256,6 +4539,7 @@ EOF
 
         cat <<EOF > "$_exp_exec_sh"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -4334,7 +4618,11 @@ EOF
             done
             IFS=$IFS_BACKUP
         elif [ "$MIG_TYPE" = "TABLESPACE" ]; then
-            echo "  FOR rec IN (SELECT owner, table_name FROM dba_tables WHERE tablespace_name IN ($TARGET_IN_CLAUSE)) LOOP" >> "$STATS_SQL"
+            # [FIX v09.04.00] (B30) 파티션 테이블은 dba_tables.tablespace_name 이 NULL 이라 빠졌다.
+            #   파티션 / 서브파티션의 테이블스페이스도 함께 본다.
+            echo "  FOR rec IN (SELECT owner, table_name FROM dba_tables WHERE tablespace_name IN ($TARGET_IN_CLAUSE)" >> "$STATS_SQL"
+            echo "              UNION SELECT table_owner, table_name FROM dba_tab_partitions WHERE tablespace_name IN ($TARGET_IN_CLAUSE)" >> "$STATS_SQL"
+            echo "              UNION SELECT table_owner, table_name FROM dba_tab_subpartitions WHERE tablespace_name IN ($TARGET_IN_CLAUSE)) LOOP" >> "$STATS_SQL"
             echo "    DBMS_STATS.EXPORT_TABLE_STATS(ownname => rec.owner, tabname => rec.table_name, statown => '$STAT_OWN', stattab => '$STAT_TAB');" >> "$STATS_SQL"
             echo "  END LOOP;" >> "$STATS_SQL"
         fi
@@ -4365,6 +4653,7 @@ EOF
         
         cat <<EOF > "$STATS_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -4436,6 +4725,9 @@ EOF
         echo "  * 생성 중: $XFER_SH (재시도 + 무결성 검증 포함)"
         cat <<EOF > "$XFER_SH"
 #!/bin/bash
+# [v09.04.00] 인자로 받은 경로가 상대경로면 cd 전에 절대경로로 바꾼다
+case "\${1:-}" in ""|/*) : ;; *) set -- "\$(pwd)/\$1" ;; esac
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  [NEW v07] Auto Transfer with Retry & Integrity Verification
 #  Job ID  : ${UNIQUE_ID}
@@ -4451,6 +4743,15 @@ XFER_LOG="transfer_${UNIQUE_ID}.log"
 
 log() { echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" | tee -a "\$XFER_LOG"; }
 
+# [v09.04.00] (개선10) 키 인증이 안 되면 패스워드 프롬프트에서 멈추지 않고 바로 실패하게 한다.
+#   (무인/백그라운드 실행에서 영원히 대기하던 문제) SSH 키 교환을 먼저 해 두십시오.
+SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30"
+if ! ssh \$SSH_OPTS "\${TGT_USER}@\${TGT_IP}" true 2>/dev/null; then
+    log ">> [FAIL] \${TGT_USER}@\${TGT_IP} 에 SSH 키 인증으로 접속할 수 없습니다."
+    log "          ssh-copy-id \${TGT_USER}@\${TGT_IP} 로 키를 등록한 뒤 다시 실행하십시오."
+    exit 1
+fi
+
 # rsync 가 있으면 중단 지점 이어받기(--partial)가 가능해 대용량에 유리하다.
 if command -v rsync >/dev/null 2>&1; then
     XFER_TOOL="rsync"
@@ -4463,9 +4764,9 @@ send_one() {
     _try=1
     while [ \$_try -le \$MAX_RETRY ]; do
         if [ "\$XFER_TOOL" = "rsync" ]; then
-            rsync -a --partial --timeout=120 "\$_f" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" && return 0
+            rsync -a --partial --timeout=120 -e "ssh \$SSH_OPTS" "\$_f" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" && return 0
         else
-            scp -p "\$_f" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" && return 0
+            scp -p \$SSH_OPTS "\$_f" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" && return 0
         fi
         log "   [RETRY \$_try/\$MAX_RETRY] 전송 실패: \$(basename "\$_f")"
         _try=\$((_try + 1))
@@ -4504,8 +4805,8 @@ fi
 # 전송 후 원격지 무결성 검증 (체크섬 매니페스트가 함께 전송된 경우)
 if [ -f "\$SRC_DIR/${UNIQUE_ID}_dumpfiles.md5" ]; then
     log ">> 원격 서버에서 체크섬 무결성 검증을 시도합니다..."
-    if scp -p "./checksum_verify_${UNIQUE_ID}.sh" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" 2>/dev/null; then
-        ssh "\${TGT_USER}@\${TGT_IP}" "bash \${TGT_PATH}/checksum_verify_${UNIQUE_ID}.sh \${TGT_PATH}" 2>&1 | tee -a "\$XFER_LOG"
+    if scp -p \$SSH_OPTS "./checksum_verify_${UNIQUE_ID}.sh" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" 2>/dev/null; then
+        ssh \$SSH_OPTS "\${TGT_USER}@\${TGT_IP}" "bash \${TGT_PATH}/checksum_verify_${UNIQUE_ID}.sh \${TGT_PATH}" 2>&1 | tee -a "\$XFER_LOG"
         # [FIX v09.03.01] (B8) 파이프의 종료코드는 tee 의 것이라, 원격 검증이 불일치로
         #   실패해도 이 스크립트는 0 으로 끝났다. ssh 쪽 종료코드를 직접 본다.
         _vrc=\${PIPESTATUS[0]}
@@ -4751,6 +5052,7 @@ DECLARE
   v_cols  VARCHAR2(32767);
   v_st    NUMBER;
   v_null  NUMBER;
+  v_dtype VARCHAR2(128);
 BEGIN
   FOR t IN (SELECT owner, table_name FROM dba_tables
              WHERE owner IN (${DL_OWNER_IN})
@@ -4764,6 +5066,25 @@ BEGIN
                ORDER BY column_id) LOOP
       v_cols := v_cols || CASE WHEN v_cols IS NOT NULL THEN ',' END || '"' || c.column_name || '"';
     END LOOP;
+
+    -- [FIX v09.04.00] (E7) CREATE_CHUNKS_BY_SQL 의 start_id/end_id 는 NUMBER 만 받는다.
+    --   DATE/TIMESTAMP/문자 컬럼을 고르면 ORA-06502 등으로 테이블 전체가 실패했다.
+    --   분할 컬럼이 숫자가 아니거나 없으면 그 테이블만 단일 세션 INSERT 로 넣는다.
+    BEGIN
+      SELECT data_type INTO v_dtype FROM dba_tab_cols
+       WHERE owner = t.owner AND table_name = t.table_name AND column_name = '${DL_CHUNK_COL}';
+    EXCEPTION WHEN NO_DATA_FOUND THEN v_dtype := '(NONE)';
+    END;
+    IF v_dtype NOT IN ('NUMBER', 'FLOAT', 'INTEGER', 'BINARY_FLOAT', 'BINARY_DOUBLE') THEN
+      EXECUTE IMMEDIATE 'INSERT INTO "' || t.owner || '"."' || t.table_name || '" (' || v_cols || ') '
+                     || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
+                     || ' WHERE 1 = 1${DL_WHERE_EXTRA}';
+      v_null := SQL%ROWCOUNT;
+      COMMIT;
+      DBMS_OUTPUT.PUT_LINE(RPAD(t.owner || '.' || t.table_name, 50) || ' : OK (' || v_null
+        || ' rows, single session - ${DL_CHUNK_COL} type=' || v_dtype || ' is not NUMBER)');
+      CONTINUE;
+    END IF;
 
     v_task := 'DLCOPY_${UNIQUE_ID}_' || t.table_name;
     BEGIN DBMS_PARALLEL_EXECUTE.DROP_TASK(v_task); EXCEPTION WHEN OTHERS THEN NULL; END;
@@ -4932,6 +5253,7 @@ EOF
         _ti=$(echo "$_pair" | cut -d: -f3)
         cat <<EOF > "$_sh"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -4962,14 +5284,14 @@ run_dblink_copy_mode() {
     echo "  증분 캐치업(대량 적재 후 변경분 따라잡기)에 특히 유용합니다."
     echo "======================================================================"
 
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Database Link 이름 [기본값: MIG_LINK]: "
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Database Link name [Default: MIG_LINK]: "
     else printf "  사용할 Database Link 이름 [기본값: MIG_LINK]: "; fi
     _read DL_LINK_NAME
     [ -z "$DL_LINK_NAME" ] && DL_LINK_NAME="MIG_LINK"
-    DL_LINK_NAME=$(echo "$DL_LINK_NAME" | tr 'a-z' 'A-Z')
+    DL_LINK_NAME=$(echo "$DL_LINK_NAME" | tr '[:lower:]' '[:upper:]')
 
     echo "----------------------------------------------------------------------"
-    if [ "$LANG_PREF" = "EN" ]; then printf "  대상 스키마 (쉼표 구분, 예: HR,SCOTT): "
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Target schemas (comma-separated, e.g. HR,SCOTT): "
     else printf "  대상 스키마를 입력하세요 (쉼표 구분, 예: HR,SCOTT): "; fi
     _read dl_owners
     dl_owners=$(normalize_list "$dl_owners")
@@ -4977,9 +5299,9 @@ run_dblink_copy_mode() {
         echo "  [오류] 대상 스키마가 필요합니다."
         return 1
     fi
-    DL_OWNER_IN=$(echo "$dl_owners" | sed "s/[^,]*/'&'/g" | tr 'a-z' 'A-Z')
+    DL_OWNER_IN=$(echo "$dl_owners" | sed "s/[^,]*/'&'/g" | tr '[:lower:]' '[:upper:]')
 
-    if [ "$LANG_PREF" = "EN" ]; then printf "  대상 테이블 (쉼표 구분, 전체는 엔터): "
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Target tables (comma-separated, Enter = all): "
     else printf "  대상 테이블을 지정하세요 (쉼표 구분, 스키마 전체는 엔터): "; fi
     _read dl_tables
     dl_tables=$(normalize_list "$dl_tables")
@@ -4987,7 +5309,7 @@ run_dblink_copy_mode() {
         DL_TABLE_IN="SELECT table_name FROM dba_tables WHERE owner IN (${DL_OWNER_IN})"
         _dl_scope="스키마 전체"
     else
-        DL_TABLE_IN=$(echo "$dl_tables" | sed "s/[^,]*/'&'/g" | tr 'a-z' 'A-Z')
+        DL_TABLE_IN=$(echo "$dl_tables" | sed "s/[^,]*/'&'/g" | tr '[:lower:]' '[:upper:]')
         _dl_scope="지정 테이블 ${dl_tables}"
     fi
 
@@ -4998,13 +5320,13 @@ run_dblink_copy_mode() {
     echo "  [복사 범위]"
     echo "   1) 전체 복사"
     echo "   2) 증분 — WHERE 조건 지정 (예: LAST_UPD >= TO_DATE('20260101','YYYYMMDD'))"
-    if [ "$LANG_PREF" = "EN" ]; then printf "  선택 (1-2) [기본값: 1]: "
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Select (1-2) [Default: 1]: "
     else printf "  선택 (1-2) [기본값: 1]: "; fi
     _read dl_incr_opt
     DL_WHERE_CLAUSE=""
     DL_WHERE_EXTRA=""
     if [ "$dl_incr_opt" = "2" ]; then
-        if [ "$LANG_PREF" = "EN" ]; then printf "  WHERE 조건 (WHERE 는 빼고 조건만): "
+        if [ "$LANG_PREF" = "EN" ]; then printf "  WHERE condition (without the WHERE keyword): "
         else printf "  WHERE 조건을 입력하세요 (WHERE 키워드 없이 조건만): "; fi
         _read dl_where
         if [ -n "$dl_where" ]; then
@@ -5031,25 +5353,31 @@ run_dblink_copy_mode() {
     echo "   APPEND 는 다이렉트 패스라 테이블 전체에 배타 락을 겁니다. 그래서"
     echo "   청크를 여러 세션이 동시에 밀어 넣는 2번과는 함께 쓸 수 없습니다."
     echo "   2번을 고르면 APPEND 를 빼고 일반 경로로 넣습니다."
-    if [ "$LANG_PREF" = "EN" ]; then printf "  선택 (1-2) [기본값: 1]: "
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Select (1-2) [Default: 1]: "
     else printf "  선택 (1-2) [기본값: 1]: "; fi
     _read dl_par_opt
     if [ "$dl_par_opt" = "2" ]; then
         DL_PARALLEL_MODE="CHUNK"
-        if [ "$LANG_PREF" = "EN" ]; then printf "  청크 분할 기준 숫자/날짜 컬럼 (예: ID): "
-        else printf "  청크 분할 기준 컬럼 (모든 대상에 공통으로 있어야 함, 예: ID): "; fi
+        # [FIX v09.04.00] (E7) DBMS_PARALLEL_EXECUTE 청크 경계는 NUMBER 만 된다 (날짜 불가).
+        if [ "$LANG_PREF" = "EN" ]; then printf "  Chunk split NUMBER column (e.g. ID): "
+        else printf "  청크 분할 기준 숫자(NUMBER) 컬럼 (예: ID, 숫자가 아닌 테이블은 단일 세션): "; fi
         _read DL_CHUNK_COL
         if [ -z "$DL_CHUNK_COL" ]; then
             echo "  [오류] 청크 병렬에는 분할 기준 컬럼이 필요합니다."
             return 1
         fi
-        DL_CHUNK_COL=$(echo "$DL_CHUNK_COL" | tr 'a-z' 'A-Z')
+        DL_CHUNK_COL=$(echo "$DL_CHUNK_COL" | tr '[:lower:]' '[:upper:]')
+        # 컬럼명이 생성 SQL 문자열에 그대로 들어가므로 식별자 형태만 허용
+        if ! echo "$DL_CHUNK_COL" | grep -qE '^[A-Z][A-Z0-9_$#]*$'; then
+            echo "  [오류] 컬럼명 형식이 올바르지 않습니다: $DL_CHUNK_COL"
+            return 1
+        fi
         printf "  청크 개수 [기본값: 16]: "
         _read DL_CHUNKS
-        echo "$DL_CHUNKS" | grep -qE '^[0-9]+$' || DL_CHUNKS=16
+        echo "$DL_CHUNKS" | grep -qE '^[1-9][0-9]*$' || DL_CHUNKS=16
         printf "  동시 실행 세션 수 [기본값: 4]: "
         _read DL_PDEG
-        echo "$DL_PDEG" | grep -qE '^[0-9]+$' || DL_PDEG=4
+        echo "$DL_PDEG" | grep -qE '^[1-9][0-9]*$' || DL_PDEG=4
     else
         DL_PARALLEL_MODE="SINGLE"
         DL_CHUNK_COL=""
@@ -5199,7 +5527,7 @@ run_target_mode() {
         else printf "  사용하거나 새로 생성할 Database Link 이름을 입력하세요 [기본값: MIG_LINK]: "; fi
         _read DBLINK_NAME
         [ -z "$DBLINK_NAME" ] && DBLINK_NAME="MIG_LINK"
-        DBLINK_NAME=$(echo "$DBLINK_NAME" | tr 'a-z' 'A-Z')
+        DBLINK_NAME=$(echo "$DBLINK_NAME" | tr '[:lower:]' '[:upper:]')
 
         if [ "$MOCK_MODE" != "true" ]; then
             # [FIX v09.03.02] (B11/B15) 공통 함수로 확인. 조회 실패면 추측하지 않고 멈춘다.
@@ -5334,9 +5662,12 @@ run_target_mode() {
                         awk '/\.\ \.\ exported/ { line=$0; gsub(/"/, "", line); split(line, parts); for(i=1;i<=NF;i++) { if(parts[i]=="exported") { split(parts[i+1], obj, "."); print obj[1]; break; } } }' "$_lf"
                     done < "$LOG_LIST_FILE" | sort | uniq > "$CANDIDATES_FILE"
                 elif [ "$MIG_TYPE" = "TABLE" ]; then
+                    # [FIX v09.04.00] (B29) 파티션 테이블은 로그에 OWNER.TABLE:PARTITION 으로 찍힌다.
+                    #   예전에는 그대로 후보가 되어 파티션마다 따로 잡히고 충돌 검사도 빗나갔다.
+                    #   테이블 이름만 남기고 중복을 없앤다.
                     while IFS= read -r _lf; do
                         [ -n "$_lf" ] || continue
-                        awk '/\.\ \.\ exported/ { line=$0; gsub(/"/, "", line); split(line, parts); for(i=1;i<=NF;i++) { if(parts[i]=="exported") { print parts[i+1]; break; } } }' "$_lf"
+                        awk '/\.\ \.\ exported/ { line=$0; gsub(/"/, "", line); split(line, parts); for(i=1;i<=NF;i++) { if(parts[i]=="exported") { t=parts[i+1]; sub(/:.*/, "", t); print t; break; } } }' "$_lf"
                     done < "$LOG_LIST_FILE" | sort | uniq > "$CANDIDATES_FILE"
                 elif [ "$MIG_TYPE" = "TABLESPACE" ]; then
                     while IFS= read -r _lf; do
@@ -5391,45 +5722,57 @@ EOF
         TABLE_FILE="$(tmpf table_data.tmp)"
         : > "$TABLE_FILE"
         idx=1
-        
+
+        # [v09.04.00] (개선13) SCHEMA / TABLE 충돌 확인을 한 번의 sqlplus 로 한다.
+        #   예전에는 대상 1건마다 sqlplus 를 새로 띄워, 수백~수천 테이블이면 이 단계만
+        #   수 분이 걸렸다. 존재하는 이름만 HIT: 로 받고, 끝까지 돌았는지는 VAL:OK 로 본다.
+        #   IN 목록은 500개씩 나눈다 (ORA-01795: 1000개 제한).
+        _cf_hits="$(tmpf conflict_hits)"
+        _cf_ok=""
+        if [ "$MIG_TYPE" = "SCHEMA" ] || [ "$MIG_TYPE" = "TABLE" ]; then
+            _cf_sql="$(tmpf conflict_check.sql)"
+            {
+                echo "SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 400 TRIMSPOOL ON"
+                echo "WHENEVER SQLERROR EXIT FAILURE"
+                echo "$PDB_SWITCH_SQL"
+                tr ' ,' '\n\n' < "$CANDIDATES_FILE" | sed '/^$/d' | sed "s/'/''/g" | awk -v mt="$MIG_TYPE" '
+                    function flush() {
+                        if (n == 0) return
+                        if (mt == "SCHEMA")
+                            print "SELECT '"'"'HIT:'"'"' || username FROM dba_users WHERE username IN (" lst ");"
+                        else
+                            print "SELECT '"'"'HIT:'"'"' || owner || '"'"'.'"'"' || table_name FROM dba_tables WHERE (owner, table_name) IN (" lst ");"
+                        n = 0; lst = ""
+                    }
+                    {
+                        if (mt == "SCHEMA") v = "'"'"'" $0 "'"'"'"
+                        else { k = index($0, "."); v = "('"'"'" substr($0, 1, k - 1) "'"'"', '"'"'" substr($0, k + 1) "'"'"')" }
+                        lst = (n ? lst ", " : "") v; n++
+                        if (n >= 500) flush()
+                    }
+                    END { flush() }'
+                echo "SELECT 'VAL:OK' FROM dual;"
+                echo "EXIT;"
+            } > "$_cf_sql"
+            sqlplus -S /nolog > "$_cf_hits" 2>&1 <<EOF
+connect $DB_CONN
+@$_cf_sql
+EOF
+            grep -q '^VAL:OK' "$_cf_hits" && _cf_ok="Y"
+        fi
+
         for item in $(cat "$CANDIDATES_FILE"); do
             conflict="false"
             conflict_detail=""
-            if [ "$MIG_TYPE" = "SCHEMA" ]; then
-                cnt=$(sqlplus -S /nolog <<EOF
-connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF
-$PDB_SWITCH_SQL
-SELECT 'VAL:' || COUNT(*) FROM dba_users WHERE username='$item';
-EXIT;
-EOF
-)
+            if [ "$MIG_TYPE" = "SCHEMA" ] || [ "$MIG_TYPE" = "TABLE" ]; then
                 # [FIX v09.03.02] (B11) 조회 실패는 "충돌 없음" 이 아니라 "확인 실패" 다.
-                cnt=$(sql_val "$cnt")
-                if [ -z "$cnt" ]; then
+                if [ -z "$_cf_ok" ]; then
                     conflict="true"
                     conflict_detail="Check Failed (확인 실패 - 접속/권한)"
-                elif [ "$cnt" -gt 0 ]; then
+                elif grep -qxF "HIT:${item}" "$_cf_hits"; then
                     conflict="true"
-                    conflict_detail="User/Schema Exists"
-                fi
-            elif [ "$MIG_TYPE" = "TABLE" ]; then
-                own_p=$(echo "$item" | cut -d'.' -f1); tab_p=$(echo "$item" | cut -d'.' -f2)
-                cnt=$(sqlplus -S /nolog <<EOF
-connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF
-$PDB_SWITCH_SQL
-SELECT 'VAL:' || COUNT(*) FROM dba_tables WHERE owner='$own_p' AND table_name='$tab_p';
-EXIT;
-EOF
-)
-                cnt=$(sql_val "$cnt")
-                if [ -z "$cnt" ]; then
-                    conflict="true"
-                    conflict_detail="Check Failed (확인 실패 - 접속/권한)"
-                elif [ "$cnt" -gt 0 ]; then
-                    conflict="true"
-                    conflict_detail="Table Exists"
+                    if [ "$MIG_TYPE" = "SCHEMA" ]; then conflict_detail="User/Schema Exists"
+                    else conflict_detail="Table Exists"; fi
                 fi
             elif [ "$MIG_TYPE" = "TABLESPACE" ]; then
                 if [ "$MOCK_MODE" = "true" ]; then
@@ -5540,7 +5883,7 @@ EOF
         [ -z "$user_picks" ] && user_picks="ALL"
 
         selected_items_list=""
-        picks_upper=$(echo "$user_picks" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+        picks_upper=$(echo "$user_picks" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
         
         if [ "$picks_upper" = "ALL" ]; then
             while IFS='|' read -r t_idx t_item t_conf t_detail; do
@@ -5583,17 +5926,17 @@ EOF
                         echo "  [CONFLICT RESOLUTION] '$itm' already exists in Target DB!"
                         echo "  1) REMAP (Rename Target)"
                         echo "  2) OVERWRITE / APPEND (Use TABLE_EXISTS_ACTION)"
-                        printf "  Select action for '$itm' (1-2) [Default: 2]: "
+                        printf "  Select action for '%s' (1-2) [Default: 2]: " "${itm}"
                     else
                         echo "  [충돌 해결] '$itm' 이(가) Target DB에 이미 존재합니다!"
                         echo "  1) 이름 변경 (REMAP 적용)"
                         echo "  2) 기존 객체에 덮어쓰기/추가 (TABLE_EXISTS_ACTION 적용)"
-                        printf "  '$itm' 에 대한 조치 선택 (1-2) [기본값: 2]: "
+                        printf "  '%s' 에 대한 조치 선택 (1-2) [기본값: 2]: " "${itm}"
                     fi
                     _read c_act
                     if [ "$c_act" = "1" ]; then
-                        if [ "$LANG_PREF" = "EN" ]; then printf "     -> Enter new name for '$itm': "
-                        else printf "     -> '$itm'을(를) 대체할 새로운 이름을 입력하세요: "; fi
+                        if [ "$LANG_PREF" = "EN" ]; then printf "     -> Enter new name for '%s': " "${itm}"
+                        else printf "     -> '%s'을(를) 대체할 새로운 이름을 입력하세요: " "${itm}"; fi
                         _read new_name
                         if [ "$MIG_TYPE" = "SCHEMA" ]; then REMAP_PARAMS="$REMAP_PARAMS REMAP_SCHEMA=${itm}:${new_name}"
                         elif [ "$MIG_TYPE" = "TABLESPACE" ]; then REMAP_PARAMS="$REMAP_PARAMS REMAP_TABLESPACE=${itm}:${new_name}"
@@ -5676,7 +6019,7 @@ EOF
                 else printf "  통합할 Target 테이블스페이스명을 입력하세요 [기본값: USERS]: "; fi
                 _read tgt_unified_ts
                 [ -z "$tgt_unified_ts" ] && tgt_unified_ts="USERS"
-                tgt_unified_ts=$(echo "$tgt_unified_ts" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+                tgt_unified_ts=$(echo "$tgt_unified_ts" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
                 
                 # 소스 테이블스페이스 목록 수집
                 _src_ts_list=""
@@ -5703,12 +6046,12 @@ SQL_EOF
                 if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Target DATA Tablespace [Default: TS_DATA]: "
                 else printf "  Target DATA 테이블스페이스명 [기본값: TS_DATA]: "; fi
                 _read tgt_data_ts; [ -z "$tgt_data_ts" ] && tgt_data_ts="TS_DATA"
-                tgt_data_ts=$(echo "$tgt_data_ts" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+                tgt_data_ts=$(echo "$tgt_data_ts" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
                 
                 if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Target INDEX Tablespace [Default: TS_INDEX]: "
                 else printf "  Target INDEX 테이블스페이스명 [기본값: TS_INDEX]: "; fi
                 _read tgt_idx_ts; [ -z "$tgt_idx_ts" ] && tgt_idx_ts="TS_INDEX"
-                tgt_idx_ts=$(echo "$tgt_idx_ts" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+                tgt_idx_ts=$(echo "$tgt_idx_ts" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
                 
                 _src_ts_list="TS_DATA TS_DATA01 TS_DATA02 TS_IDX TS_INDEX01 TS_APP_LOB"
                 if [ "$MOCK_MODE" != "true" ]; then
@@ -5799,13 +6142,11 @@ SQL_EOF
 
     echo "----------------------------------------------------------------------"
     if [ "$IMPORT_METHOD" = "DUMP" ]; then
-        if [ "$LANG_PREF" = "EN" ]; then printf "  [Security] Enter TDE Encryption Password applied during backup (leave empty if none): "
-        else printf "  [보안 검토] Source 백업 시 적용된 TDE 암호화 패스워드를 입력하세요 (입력 숨김, 미사용 시 엔터): "; fi
+        # [v09.04.00] (개선9) expdp 의 ENCRYPTION_PASSWORD(덤프 암호화) 와 같은 값을 넣는다.
+        if [ "$LANG_PREF" = "EN" ]; then printf "  [Dump Encryption] ENCRYPTION_PASSWORD used by expdp (hidden, Enter = none): "
+        else printf "  [덤프 암호화] Source expdp 에서 지정한 덤프 암호화 패스워드(ENCRYPTION_PASSWORD) (입력 숨김, 없으면 엔터): "; fi
         _read_secret tde_pwd MIG_TDE_PASSWORD
-        TDE_PARAM=""
-        if [ -n "$tde_pwd" ]; then
-            TDE_PARAM="ENCRYPTION_PASSWORD=\"$tde_pwd\""
-        fi
+        pick_encryption_param "$tde_pwd" || return 1
     else
         TDE_PARAM=""
     fi
@@ -5855,6 +6196,7 @@ EOF
 
     cat <<EOF > "$DDL_EXTRACT_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -5865,8 +6207,8 @@ EOF
         cat <<EOF >> "$DDL_EXTRACT_SH"
 sqlplus -S /nolog <<SQL_EOF
 connect $(hd_esc "$DB_CONN")
-$CREATE_DIR_SQL
-$GRANT_DIR_SQL
+$(hd_esc "$CREATE_DIR_SQL")
+$(dir_grant_sql)
 EXIT;
 SQL_EOF
 
@@ -5893,7 +6235,7 @@ EOF
     else
         echo "  [impdp 작업 순서(Workflow) 선택]"
         echo "  1) 통합 복구 (모든 데이터 및 오브젝트 한번에 임포트)"
-        echo "  2) 단계별 분할 복구 (Table 구조 생성 -> Data 복구 -> 나머지 Object 복구) [권장]"
+        echo "  2) 단계별 분할 복구 (메타데이터 생성 -> Data 복구 -> 인덱스/제약조건/트리거 생성) [권장]"
         printf "  선택 (1-2) [기본값: 2]: "
     fi
     _read workflow_opt
@@ -5967,7 +6309,7 @@ EOF
     if [ "$workflow_opt" = "2" ]; then
         IMP_P1="impdp_1_table_meta_${UNIQUE_ID}.sh"
         IMP_P1_PAR="impdp_1_table_meta_${UNIQUE_ID}.par"
-        echo "  * 생성 중: $IMP_P1 및 $IMP_P1_PAR (Table 구조 생성)"
+        echo "  * 생성 중: $IMP_P1 및 $IMP_P1_PAR (메타데이터 생성, 인덱스/제약조건/트리거 제외)"
 
         cat <<EOF > "$IMP_P1_PAR"
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
@@ -5979,12 +6321,23 @@ LOGFILE=${UNIQUE_ID}_impdp_p1_table.log
 $MIG_PARAMS
 $REMAP_PARAMS
 STATUS=30
-INCLUDE=TABLE
 CONTENT=METADATA_ONLY
 LOGTIME=ALL
 METRICS=YES
 JOB_NAME=${UNIQUE_ID}_IMP_P1
 EOF
+        # [FIX v09.04.00] (B6) 예전 1단계는 INCLUDE=TABLE 이었다. INCLUDE=TABLE 은 테이블에
+        #   딸린 인덱스/제약조건/트리거까지 함께 가져오므로, 데이터 적재(2단계) 전에 인덱스와
+        #   FK 가 이미 만들어져 적재가 느렸고, 3단계(EXCLUDE=TABLE)는 테이블에 딸린 객체를
+        #   통째로 빼서 TABLE 모드에서는 3단계 자체가 없었다.
+        #   21c 전에는 INCLUDE 와 EXCLUDE 를 함께 쓸 수 없으므로 1단계를 EXCLUDE 기반으로 바꾼다.
+        #     1단계: 인덱스/제약조건/트리거를 뺀 나머지 메타데이터 (테이블, 뷰, 코드 등)
+        #     3단계: INCLUDE=INDEX,CONSTRAINT,REF_CONSTRAINT,TRIGGER (데이터 적재 후 생성)
+        if [ -n "$STAT_EXCLUDE" ]; then
+            echo "EXCLUDE=INDEX,CONSTRAINT,REF_CONSTRAINT,TRIGGER,STATISTICS" >> "$IMP_P1_PAR"
+        else
+            echo "EXCLUDE=INDEX,CONSTRAINT,REF_CONSTRAINT,TRIGGER" >> "$IMP_P1_PAR"
+        fi
         if [ -n "$CLUSTER_PARAM" ]; then echo "$CLUSTER_PARAM" >> "$IMP_P1_PAR"; fi
         if [ -n "$IMP_SOURCE_PARAM" ]; then echo "$IMP_SOURCE_PARAM" >> "$IMP_P1_PAR"; fi
         # Notice: CONTENT=METADATA_ONLY 모드에서는 PARALLEL 제외 (ORA-39144 충돌 방지)
@@ -5994,12 +6347,13 @@ EOF
 
         cat <<EOF > "$IMP_P1"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 EOF
-        generate_run_prompt "$IMP_P1" "1단계: Table 구조(Metadata) 생성"
+        generate_run_prompt "$IMP_P1" "1단계: 메타데이터 생성 (인덱스/제약조건/트리거 제외)"
         cat <<EOF >> "$IMP_P1"
 impdp PARFILE=$IMP_P1_PAR
 EOF
@@ -6182,6 +6536,7 @@ EOF
 
         cat <<EOF > "$IMP_P2"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -6306,7 +6661,8 @@ EOF
         chmod 700 "$ENA_SH"
         GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $ENA_SH"
 
-        if [ "$MIG_TYPE" != "TABLE" ]; then
+        # [FIX v09.04.00] (B6) 3단계는 모든 모드에서 만든다 (TABLE 모드도 인덱스/제약조건 필요)
+        if true; then
             IMP_P3="impdp_3_rest_${UNIQUE_ID}.sh"
             IMP_P3_PAR="impdp_3_rest_${UNIQUE_ID}.par"
             echo "  * 생성 중: $IMP_P3 및 $IMP_P3_PAR"
@@ -6327,24 +6683,24 @@ JOB_NAME=${UNIQUE_ID}_IMP_P3
 EOF
             if [ -n "$CLUSTER_PARAM" ]; then echo "$CLUSTER_PARAM" >> "$IMP_P3_PAR"; fi
             if [ -n "$IMP_SOURCE_PARAM" ]; then echo "$IMP_SOURCE_PARAM" >> "$IMP_P3_PAR"; fi
-            # [FIX v07/M2] 'TABLE/TABLE' 은 Data Pump 표준 object path 가 아니어서
-            #              3단계 impdp 가 실패했다. 테이블 본체만 제외하려면 EXCLUDE=TABLE 사용.
-            if [ -n "$STAT_EXCLUDE" ]; then
-                echo "EXCLUDE=TABLE,STATISTICS" >> "$IMP_P3_PAR"
-            else
-                echo "EXCLUDE=TABLE" >> "$IMP_P3_PAR"
-            fi
+            # [FIX v09.04.00] (B6) EXCLUDE=TABLE 은 테이블에 딸린 인덱스/제약조건/트리거까지
+            #   빼 버려 3단계에서 정작 필요한 객체가 하나도 만들어지지 않았다. 1단계가 그 네 가지를
+            #   빼고 나머지를 모두 만들었으므로 3단계는 그 네 가지만 가져온다.
+            #   (INCLUDE 와 EXCLUDE 를 함께 쓸 수 없으므로 통계 제외는 목록에 STATISTICS 를
+            #    넣지 않는 것으로 갈음한다.)
+            echo "INCLUDE=INDEX,CONSTRAINT,REF_CONSTRAINT,TRIGGER" >> "$IMP_P3_PAR"
             if [ "$CALC_PARALLEL" -gt 0 ]; then echo "PARALLEL=$CALC_PARALLEL" >> "$IMP_P3_PAR"; fi
             if [ -n "$TDE_PARAM" ]; then echo "$TDE_PARAM" >> "$IMP_P3_PAR"; fi
 
             cat <<EOF > "$IMP_P3"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 EOF
-            generate_run_prompt "$IMP_P3" "3단계: 나머지 오브젝트(인덱스,뷰,트리거 등) 복구"
+            generate_run_prompt "$IMP_P3" "3단계: 인덱스/제약조건/트리거 생성 (데이터 적재 후)"
             cat <<EOF >> "$IMP_P3"
 impdp PARFILE=$IMP_P3_PAR
 EOF
@@ -6380,6 +6736,7 @@ EOF
 
         cat <<EOF > "$IMP_ALL"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -6475,6 +6832,7 @@ EOF
 
         cat <<EOF > "$IMP_STATS_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -6536,12 +6894,13 @@ EOF
     
     echo "  * 생성 중: $LOCK_SQL, $LOCK_SH, $UNLOCK_SQL, $UNLOCK_SH"
     
+    _ts_lock_scope=$(mig_scope_pred "owner" "table_name")
     cat <<EOF > "$LOCK_SQL"
 -- ==============================================================================
 --  Lock Optimizer Statistics to Prevent Nightly Auto Task Plan Regression
 --  Job ID: ${UNIQUE_ID}
 -- ==============================================================================
-SET ECHO ON LOGONLY SERVEROUTPUT ON
+SET ECHO ON SERVEROUTPUT ON
 SPOOL lock_stats_${UNIQUE_ID}.log
 $PDB_SWITCH_SQL
 
@@ -6556,7 +6915,7 @@ EOF
 
     if [ "$MIG_TYPE" = "FULL" ]; then
         cat <<EOF >> "$LOCK_SQL"
-  FOR r IN (SELECT username FROM dba_users WHERE username NOT IN ('SYS','SYSTEM','AUDSYS','XDB','WMSYS','MDSYS','ORDDATA','CTXSYS','DBSNMP')) LOOP
+  FOR r IN (SELECT username FROM dba_users WHERE $(ora_internal_excl "username")) LOOP
     BEGIN
       DBMS_STATS.LOCK_SCHEMA_STATS(ownname => r.username);
       DBMS_OUTPUT.PUT_LINE('>> Locked Schema Stats: ' || r.username);
@@ -6601,7 +6960,8 @@ EOF
         IFS=$IFS_BACKUP
     elif [ "$MIG_TYPE" = "TABLESPACE" ]; then
         cat <<EOF >> "$LOCK_SQL"
-  FOR r IN (SELECT owner, table_name FROM dba_tables WHERE tablespace_name IN (${FINAL_IN_CLAUSE:-NULL})) LOOP
+  -- [v09.04.00] (B30) 파티션 테이블 포함, REMAP_TABLESPACE 반영 (Target 의 실제 테이블스페이스 기준)
+  FOR r IN (SELECT owner, table_name FROM dba_tables WHERE ${_ts_lock_scope}) LOOP
     BEGIN
       DBMS_STATS.LOCK_TABLE_STATS(ownname => r.owner, tabname => r.table_name);
       DBMS_OUTPUT.PUT_LINE('>> Locked Table Stats: ' || r.owner || '.' || r.table_name);
@@ -6623,6 +6983,7 @@ EOF
 
     cat <<EOF > "$LOCK_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -6649,7 +7010,7 @@ EOF
 --  Unlock Optimizer Statistics for Maintenance
 --  Job ID: ${UNIQUE_ID}
 -- ==============================================================================
-SET ECHO ON LOGONLY SERVEROUTPUT ON
+SET ECHO ON SERVEROUTPUT ON
 SPOOL unlock_stats_${UNIQUE_ID}.log
 $PDB_SWITCH_SQL
 
@@ -6663,7 +7024,7 @@ BEGIN
 EOF
     if [ "$MIG_TYPE" = "FULL" ]; then
         cat <<EOF >> "$UNLOCK_SQL"
-  FOR r IN (SELECT username FROM dba_users WHERE username NOT IN ('SYS','SYSTEM','AUDSYS','XDB','WMSYS','MDSYS','ORDDATA','CTXSYS','DBSNMP')) LOOP
+  FOR r IN (SELECT username FROM dba_users WHERE $(ora_internal_excl "username")) LOOP
     BEGIN
       DBMS_STATS.UNLOCK_SCHEMA_STATS(ownname => r.username);
       DBMS_OUTPUT.PUT_LINE('>> Unlocked Schema Stats: ' || r.username);
@@ -6708,7 +7069,8 @@ EOF
         IFS=$IFS_BACKUP
     elif [ "$MIG_TYPE" = "TABLESPACE" ]; then
         cat <<EOF >> "$UNLOCK_SQL"
-  FOR r IN (SELECT owner, table_name FROM dba_tables WHERE tablespace_name IN (${FINAL_IN_CLAUSE:-NULL})) LOOP
+  -- [v09.04.00] (B30) 파티션 테이블 포함, REMAP_TABLESPACE 반영 (Target 의 실제 테이블스페이스 기준)
+  FOR r IN (SELECT owner, table_name FROM dba_tables WHERE ${_ts_lock_scope}) LOOP
     BEGIN
       DBMS_STATS.UNLOCK_TABLE_STATS(ownname => r.owner, tabname => r.table_name);
       DBMS_OUTPUT.PUT_LINE('>> Unlocked Table Stats: ' || r.owner || '.' || r.table_name);
@@ -6730,6 +7092,7 @@ EOF
 
     cat <<EOF > "$UNLOCK_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -6784,7 +7147,7 @@ PROMPT 1. Invalid Object Summary (Target DB) - Status Check
 PROMPT =======================================================================
 SELECT owner, object_type, count(*) as invalid_count 
 FROM dba_objects 
-WHERE status = 'INVALID' AND owner NOT IN ('SYS','SYSTEM')
+WHERE status = 'INVALID' AND $(ora_internal_excl "owner")
 GROUP BY owner, object_type
 ORDER BY owner, object_type;
 
@@ -6793,7 +7156,7 @@ PROMPT 2. Target Schema Object Count Summary
 PROMPT =======================================================================
 SELECT owner, object_type, count(*) as object_count
 FROM dba_objects
-WHERE owner NOT IN ('SYS','SYSTEM','XDB','WMSYS','OJVMSYS','OUTLN','DBSNMP','AUDSYS')
+WHERE $(ora_internal_excl "owner")
 GROUP BY owner, object_type
 ORDER BY 1, 2;
 
@@ -6814,13 +7177,14 @@ SELECT NVL(tgt.owner, src.owner) as OWNER,
        ROUND(NVL(src.bytes,0)/1024/1024, 2) AS SOURCE_MB,
        ROUND(ABS(NVL(tgt.bytes,0) - NVL(src.bytes,0)) / NULLIF(NVL(src.bytes,0), 0) * 100, 2) AS DIFF_PERCENT
 FROM tgt FULL OUTER JOIN src ON tgt.owner = src.owner
-WHERE NVL(tgt.owner, src.owner) NOT IN ('SYS','SYSTEM','XDB','WMSYS','OJVMSYS','OUTLN','DBSNMP')
+WHERE $(ora_internal_excl "NVL(tgt.owner, src.owner)")
 ORDER BY 1;
 
 EXIT;
 EOF
         cat <<EOF > "$VAL_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -7068,15 +7432,20 @@ esc_csv() {
 }
 
 find_latest_csv() {
-    # [NEW v08.03] 함수 스크래치 변수 지역화 — 메뉴 재진입/함수 간 값 누수 차단
-    # [v09.02] local 제거 (ksh 비호환): _fc
-    _fc_pat="$1"
-    _fc_found=""
-    for _fc in $_fc_pat; do
-        [ -e "$_fc" ] || continue
-        _fc_found="$_fc"
-    done
-    echo "$_fc_found"
+    # [FIX v09.04.00] (B20) find_latest_csv <접두어> <작업ID>
+    #   예전에는 "<접두어><ID>*.csv" 가 없으면 "<접두어>*.csv" 중 알파벳순 마지막 파일을
+    #   썼다. 같은 디렉터리에 다른 작업의 결과가 있으면 그 작업의 ROW COUNT / DEEP DIFF
+    #   결과가 이번 보고서에 PASS 로 실렸다. 또 JOB1 로 찾으면 JOB10 결과도 잡혔다.
+    #   - 작업 ID 가 있으면 그 작업 파일(<접두어><ID>.csv)만 쓴다. 없으면 섹션을 생략한다.
+    #   - 작업 ID 를 모를 때만 수정시각이 가장 최근인 파일을 쓴다.
+    _fc_pre="$1"
+    _fc_uid="$2"
+    if [ -n "$_fc_uid" ]; then
+        [ -e "${_fc_pre}${_fc_uid}.csv" ] && echo "${_fc_pre}${_fc_uid}.csv"
+        return 0
+    fi
+    # shellcheck disable=SC2012
+    ls -t "${_fc_pre}"*.csv 2>/dev/null | head -1
 }
 
 # ------------------------------------------------------------------------------
@@ -7087,8 +7456,7 @@ html_append_preflight_section() {
     _hp_file="$1"
     _hp_uid="$2"
 
-    _hp_csv=$(find_latest_csv "./preflight_result_${_hp_uid}*.csv")
-    [ -z "$_hp_csv" ] && _hp_csv=$(find_latest_csv "./preflight_result_*.csv")
+    _hp_csv=$(find_latest_csv "./preflight_result_" "${_hp_uid}")
     [ -z "$_hp_csv" ] && return 0
     [ -s "$_hp_csv" ] || return 0
 
@@ -7158,8 +7526,7 @@ html_append_checksum_section() {
     _hc_file="$1"
     _hc_uid="$2"
 
-    _hc_csv=$(find_latest_csv "./checksum_result_${_hc_uid}*.csv")
-    [ -z "$_hc_csv" ] && _hc_csv=$(find_latest_csv "./checksum_result_*.csv")
+    _hc_csv=$(find_latest_csv "./checksum_result_" "${_hc_uid}")
     [ -z "$_hc_csv" ] && return 0
     [ -s "$_hc_csv" ] || return 0
 
@@ -7221,8 +7588,7 @@ html_append_deepdiff_section() {
     _hd_file="$1"
     _hd_uid="$2"
 
-    _hd_csv=$(find_latest_csv "./deepdiff_result_${_hd_uid}*.csv")
-    [ -z "$_hd_csv" ] && _hd_csv=$(find_latest_csv "./deepdiff_result_*.csv")
+    _hd_csv=$(find_latest_csv "./deepdiff_result_" "${_hd_uid}")
     [ -z "$_hd_csv" ] && return 0
     [ -s "$_hd_csv" ] || return 0
 
@@ -7315,8 +7681,7 @@ html_append_rowcount_section() {
     _hr_file="$1"
     _hr_uid="$2"
 
-    _hr_csv=$(find_latest_csv "./rowcount_result_${_hr_uid}*.csv")
-    [ -z "$_hr_csv" ] && _hr_csv=$(find_latest_csv "./rowcount_result_*.csv")
+    _hr_csv=$(find_latest_csv "./rowcount_result_" "${_hr_uid}")
     [ -z "$_hr_csv" ] && return 0
     [ -s "$_hr_csv" ] || return 0
 
@@ -7364,6 +7729,7 @@ EOF
         [ "$_st" = "MATCH" ] && continue
         case "$_st" in
             MISSING_IN_TOBE) _rtag='<span class="tag missing">MISSING</span>' ;;
+            COUNT_ERROR)     _rtag='<span class="tag error">COUNT ERROR</span>' ;;
             ONLY_IN_TOBE)    _rtag='<span class="tag added">ADDED</span>' ;;
             *)               _rtag='<span class="tag mismatch">MISMATCH</span>' ;;
         esac
@@ -7387,8 +7753,7 @@ html_append_rowcount_part_section() {
     _hq_file="$1"
     _hq_uid="$2"
 
-    _hq_csv=$(find_latest_csv "./rowcount_part_result_${_hq_uid}*.csv")
-    [ -z "$_hq_csv" ] && _hq_csv=$(find_latest_csv "./rowcount_part_result_*.csv")
+    _hq_csv=$(find_latest_csv "./rowcount_part_result_" "${_hq_uid}")
     [ -z "$_hq_csv" ] && return 0
     [ -s "$_hq_csv" ] || return 0
 
@@ -7458,8 +7823,7 @@ html_append_hash_section() {
     _hh_file="$1"
     _hh_uid="$2"
 
-    _hh_csv=$(find_latest_csv "./hash_result_${_hh_uid}*.csv")
-    [ -z "$_hh_csv" ] && _hh_csv=$(find_latest_csv "./hash_result_*.csv")
+    _hh_csv=$(find_latest_csv "./hash_result_" "${_hh_uid}")
     [ -z "$_hh_csv" ] && return 0
     [ -s "$_hh_csv" ] || return 0
 
@@ -7512,6 +7876,7 @@ EOF
             ONLY_IN_TOBE)      _hh_tag='<span class="tag added">ADDED</span>' ;;
             COLUMN_MISMATCH)   _hh_tag='<span class="tag error">COLUMN DIFF</span>' ;;
             ROWCOUNT_MISMATCH) _hh_tag='<span class="tag mismatch">ROWCOUNT</span>' ;;
+            HASH_ERROR)        _hh_tag='<span class="tag error">HASH ERROR</span>' ;;
             *)                 _hh_tag='<span class="tag mismatch">DATA DIFF</span>' ;;
         esac
         echo "      <tr><td>${_own}</td><td><strong>${_hh_tab}</strong></td><td>${_ar}</td><td>${_tr}</td><td>${_sk}</td><td>${_hh_tag}</td></tr>" >> "$_hh_file"
@@ -7595,6 +7960,62 @@ cs_check_note() {
         FAIL) echo "<em style=\"color:#ef4444\">(불일치/누락 ${CHECKSUM_BAD_CNT}건 - 재전송 필요)</em>" ;;
     esac
     return 0
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.04.00] (B19) Export/Import 로그 건수 대조 규칙 (콘솔 / HTML 공용)
+#   log_match_rows <exp_tmp> <imp_tmp> <imp_log>
+#     입력 : "OWNER.TABLE,건수" 목록 2개 (로그에서 추출한 것)
+#     출력 : "STATUS|표시명|Export건수|Import건수"  (STATUS = MATCH/MISMATCH/MISSING/ADDED)
+#   예전에는 "OWNER.TABLE" 이 Import 쪽에 없으면 테이블명만으로 아무 스키마의 첫 줄을
+#   골랐다. 여러 스키마에 같은 이름(EMP 등)이 있으면 엉뚱한 테이블과 비교해 [일치] 로
+#   찍혔고, grep 정규식이라 $ / . 이 든 이름은 다른 줄에 걸렸다.
+#     1) Import 로그의 REMAP_SCHEMA 로 새 스키마를 구해 정확히 찾는다.
+#     2) 그래도 없으면, 같은 테이블명이 Import 쪽에 "딱 하나" 있고 그 테이블이 Export
+#        쪽 다른 항목과 짝이 아닐 때만 대응시킨다.
+# ------------------------------------------------------------------------------
+log_match_rows() {
+    _lm_exp="$1"; _lm_imp="$2"; _lm_log="$3"
+    _lm_remaps=$(grep -io 'remap_schema=[^ ]*' "$_lm_log" 2>/dev/null | sed 's/^[^=]*=//' \
+        | tr ',' '\n' | tr -d "\"'" | tr '[:lower:]' '[:upper:]' | sort -u)
+    _lm_matched=$(tmpf "lm_matched")
+    : > "$_lm_matched"
+    while IFS=, read -r _lm_t _lm_ec; do
+        [ -z "$_lm_t" ] && continue
+        _lm_disp="$_lm_t"
+        _lm_cand=""
+        if awk -F, -v t="$_lm_t" '$1 == t { f=1 } END { exit !f }' "$_lm_imp"; then
+            _lm_cand="$_lm_t"
+        else
+            _lm_own="${_lm_t%%.*}"
+            _lm_tab="${_lm_t#*.}"
+            _lm_nown=$(echo "$_lm_remaps" | awk -F: -v o="$_lm_own" '$1 == o { print $2; exit }')
+            if [ -n "$_lm_nown" ] && awk -F, -v t="${_lm_nown}.${_lm_tab}" '$1 == t { f=1 } END { exit !f }' "$_lm_imp"; then
+                _lm_cand="${_lm_nown}.${_lm_tab}"
+            else
+                _lm_list=$(awk -F, -v n="$_lm_tab" '{ k = index($1, "."); if (substr($1, k + 1) == n) print $1 }' "$_lm_imp")
+                if [ -n "$_lm_list" ] && [ "$(echo "$_lm_list" | wc -l | tr -d ' ')" = "1" ] \
+                   && ! awk -F, -v t="$_lm_list" '$1 == t { f=1 } END { exit !f }' "$_lm_exp" \
+                   && ! awk -v t="$_lm_list" '$0 == t { f=1 } END { exit !f }' "$_lm_matched"; then
+                    _lm_cand="$_lm_list"
+                fi
+            fi
+            [ -n "$_lm_cand" ] && _lm_disp="$_lm_t -> $_lm_cand"
+        fi
+        if [ -z "$_lm_cand" ]; then
+            echo "MISSING|${_lm_disp}|${_lm_ec}|"
+            continue
+        fi
+        echo "$_lm_cand" >> "$_lm_matched"
+        _lm_ic=$(awk -F, -v t="$_lm_cand" '$1 == t { print $2; exit }' "$_lm_imp")
+        if [ "$_lm_ec" = "$_lm_ic" ]; then echo "MATCH|${_lm_disp}|${_lm_ec}|${_lm_ic}"
+        else echo "MISMATCH|${_lm_disp}|${_lm_ec}|${_lm_ic}"; fi
+    done < "$_lm_exp"
+    while IFS=, read -r _lm_t _lm_ic; do
+        [ -z "$_lm_t" ] && continue
+        awk -v t="$_lm_t" '$0 == t { f=1 } END { exit !f }' "$_lm_matched" || echo "ADDED|${_lm_t}||${_lm_ic}"
+    done < "$_lm_imp"
+    rm -f "$_lm_matched"
 }
 
 # HTML 종합 마이그레이션 감사 보고서 생성 함수
@@ -7729,35 +8150,15 @@ generate_html_audit_report() {
 EOF
 
     if [ -f "$_rep_exp_tmp" ] && [ -f "$_rep_imp_tmp" ]; then
-        while IFS=, read -r tbl exp_cnt; do
-            imp_cnt=$(grep "^${tbl}," "$_rep_imp_tmp" | cut -d',' -f2)
-            if [ -z "$imp_cnt" ]; then
-                tbl_only=$(echo "$tbl" | cut -d'.' -f2)
-                imp_match_line=$(grep "\.${tbl_only}," "$_rep_imp_tmp" | head -n 1)
-                if [ -n "$imp_match_line" ]; then
-                    imp_cnt=$(echo "$imp_match_line" | cut -d',' -f2)
-                    tbl_mapped=$(echo "$imp_match_line" | cut -d',' -f1)
-                    tbl="$tbl -> $tbl_mapped"
-                fi
-            fi
-
-            if [ -z "$imp_cnt" ]; then
-                echo "      <tr data-status=\"missing\"><td><strong>$tbl</strong></td><td>$exp_cnt</td><td>N/A</td><td><span class=\"tag missing\">MISSING</span></td></tr>" >> "$HTML_REPORT"
-            elif [ "$exp_cnt" = "$imp_cnt" ]; then
-                echo "      <tr data-status=\"match\"><td><strong>$tbl</strong></td><td>$exp_cnt</td><td>$imp_cnt</td><td><span class=\"tag match\">MATCH</span></td></tr>" >> "$HTML_REPORT"
-            else
-                echo "      <tr data-status=\"mismatch\"><td><strong>$tbl</strong></td><td>$exp_cnt</td><td>$imp_cnt</td><td><span class=\"tag mismatch\">MISMATCH</span></td></tr>" >> "$HTML_REPORT"
-            fi
-        done < "$_rep_exp_tmp"
-
-        while IFS=, read -r tbl imp_cnt; do
-            if ! grep -q "^${tbl}," "$_rep_exp_tmp"; then
-                tbl_only=$(echo "$tbl" | cut -d'.' -f2)
-                if ! grep -q "\.${tbl_only}," "$_rep_exp_tmp"; then
-                    echo "      <tr data-status=\"added\"><td><strong>$tbl</strong></td><td>N/A</td><td>$imp_cnt</td><td><span class=\"tag added\">ADDED</span></td></tr>" >> "$HTML_REPORT"
-                fi
-            fi
-        done < "$_rep_imp_tmp"
+        # [FIX v09.04.00] (B19) 콘솔 결과와 같은 매칭 규칙 사용
+        log_match_rows "$_rep_exp_tmp" "$_rep_imp_tmp" "$_rep_imp_log" | while IFS='|' read -r _lv_st tbl exp_cnt imp_cnt; do
+            case "$_lv_st" in
+                MISSING)  echo "      <tr data-status=\"missing\"><td><strong>$tbl</strong></td><td>$exp_cnt</td><td>N/A</td><td><span class=\"tag missing\">MISSING</span></td></tr>" ;;
+                MATCH)    echo "      <tr data-status=\"match\"><td><strong>$tbl</strong></td><td>$exp_cnt</td><td>$imp_cnt</td><td><span class=\"tag match\">MATCH</span></td></tr>" ;;
+                MISMATCH) echo "      <tr data-status=\"mismatch\"><td><strong>$tbl</strong></td><td>$exp_cnt</td><td>$imp_cnt</td><td><span class=\"tag mismatch\">MISMATCH</span></td></tr>" ;;
+                ADDED)    echo "      <tr data-status=\"added\"><td><strong>$tbl</strong></td><td>N/A</td><td>$imp_cnt</td><td><span class=\"tag added\">ADDED</span></td></tr>" ;;
+            esac
+        done >> "$HTML_REPORT"
     fi
 
     cat <<EOF >> "$HTML_REPORT"
@@ -7991,34 +8392,18 @@ run_log_verify() {
     echo "  --------------------------------------------------------------------------------------"
 
     mismatches=0; matches=0
-    
-    while IFS=, read -r tbl exp_cnt; do
-        imp_cnt=$(grep "^${tbl}," "$imp_tmp" | cut -d',' -f2)
-        if [ -z "$imp_cnt" ]; then
-            tbl_only=$(echo "$tbl" | cut -d'.' -f2)
-            imp_match_line=$(grep "\.${tbl_only}," "$imp_tmp" | head -n 1)
-            if [ -n "$imp_match_line" ]; then
-                imp_cnt=$(echo "$imp_match_line" | cut -d',' -f2)
-                tbl_mapped=$(echo "$imp_match_line" | cut -d',' -f1)
-                tbl="$tbl -> $tbl_mapped"
-            fi
-        fi
 
-        if [ -z "$imp_cnt" ]; then printf "  %-38s | %-12s | %-12s | \033[31m%-10s\033[0m\n" "$tbl" "$exp_cnt" "MISSING" "[누락]"; mismatches=$((mismatches + 1))
-        elif [ "$exp_cnt" = "$imp_cnt" ]; then printf "  %-38s | %-12s | %-12s | \033[32m%-10s\033[0m\n" "$tbl" "$exp_cnt" "$imp_cnt" "[일치]"; matches=$((matches + 1))
-        else printf "  %-38s | %-12s | %-12s | \033[33m%-10s\033[0m\n" "$tbl" "$exp_cnt" "$imp_cnt" "[불일치]"; mismatches=$((mismatches + 1))
-        fi
-    done < "$exp_tmp"
-
-    while IFS=, read -r tbl imp_cnt; do
-        if ! grep -q "^${tbl}," "$exp_tmp"; then
-            tbl_only=$(echo "$tbl" | cut -d'.' -f2)
-            if ! grep -q "\.${tbl_only}," "$exp_tmp"; then
-                printf "  %-38s | %-12s | %-12s | \033[36m%-10s\033[0m\n" "$tbl" "N/A" "$imp_cnt" "[추가됨]"
-                mismatches=$((mismatches + 1))
-            fi
-        fi
-    done < "$imp_tmp"
+    # [FIX v09.04.00] (B19) 매칭 규칙은 log_match_rows 한 곳에서 (HTML 보고서와 동일)
+    log_match_rows "$exp_tmp" "$imp_tmp" "$imp_log" > "${imp_tmp}.rows"
+    while IFS='|' read -r _lv_st tbl exp_cnt imp_cnt; do
+        case "$_lv_st" in
+            MISSING)  printf "  %-38s | %-12s | %-12s | \033[31m%-10s\033[0m\n" "$tbl" "$exp_cnt" "MISSING" "[누락]"; mismatches=$((mismatches + 1)) ;;
+            MATCH)    printf "  %-38s | %-12s | %-12s | \033[32m%-10s\033[0m\n" "$tbl" "$exp_cnt" "$imp_cnt" "[일치]"; matches=$((matches + 1)) ;;
+            MISMATCH) printf "  %-38s | %-12s | %-12s | \033[33m%-10s\033[0m\n" "$tbl" "$exp_cnt" "$imp_cnt" "[불일치]"; mismatches=$((mismatches + 1)) ;;
+            ADDED)    printf "  %-38s | %-12s | %-12s | \033[36m%-10s\033[0m\n" "$tbl" "N/A" "$imp_cnt" "[추가됨]"; mismatches=$((mismatches + 1)) ;;
+        esac
+    done < "${imp_tmp}.rows"
+    rm -f "${imp_tmp}.rows"
 
     echo "  --------------------------------------------------------------------------------------"
     if [ $mismatches -eq 0 ]; then
@@ -8157,10 +8542,15 @@ COL EVENT FORMAT A30 HEADING "EVENT"
 COL STATUS FORMAT A10 HEADING "STATUS"
 COL SECONDS_IN_WAIT FORMAT 9999 HEADING "WAIT(s)"
 COL SQL_ID FORMAT A14 HEADING "SQL_ID"
-SELECT s.inst_id, s.sid || ',' || s.serial# AS SESS, s.status, s.event, s.seconds_in_wait, s.sql_id
+-- [v09.04.00] (개선17) 예전 조건 program LIKE '%dp%' 는 프로그램명에 dp 가 든 아무 세션
+--   (예: "udp", "dpclient") 이나 잡았고, DW/DM 프로세스는 놓치기도 했다.
+--   Data Pump 가 직접 관리하는 세션 목록(dba_datapump_sessions)과 조인한다.
+COL JOB_NAME FORMAT A30 HEADING "JOB"
+COL SESSION_TYPE FORMAT A8 HEADING "TYPE"
+SELECT s.inst_id, d.job_name, d.session_type, s.sid || ',' || s.serial# AS SESS, s.status, s.event, s.seconds_in_wait, s.sql_id
 FROM gv\$session s
-WHERE s.program LIKE '%dp%' OR s.module LIKE '%Data Pump%' OR s.action LIKE '%Data Pump%'
-ORDER BY s.inst_id, s.sid;
+JOIN dba_datapump_sessions d ON d.saddr = s.saddr AND d.inst_id = s.inst_id
+ORDER BY s.inst_id, d.job_name, s.sid;
 
 EXIT;
 SQL_EOF
@@ -8230,7 +8620,7 @@ PROMPT 1. Pre-existing Invalid Objects Summary (Source/Target DB)
 PROMPT ========================================================================
 SELECT owner, object_type, count(*) as invalid_count 
 FROM dba_objects 
-WHERE status = 'INVALID' AND owner NOT IN ('SYS','SYSTEM','AUDSYS')
+WHERE status = 'INVALID' AND $(ora_internal_excl "owner")
 GROUP BY owner, object_type
 ORDER BY owner, object_type;
 
@@ -8240,7 +8630,7 @@ PROMPT ========================================================================
 SELECT owner, table_name, column_name, data_type 
 FROM dba_tab_cols 
 WHERE data_type IN ('LONG', 'LONG RAW', 'XMLTYPE', 'SDO_GEOMETRY', 'BFILE', 'ANYDATA')
-  AND owner NOT IN ('SYS','SYSTEM','XDB','MDSYS','ORDDATA','WMSYS','LBACSYS')
+  AND $(ora_internal_excl "owner")
 ORDER BY owner, table_name;
 
 PROMPT ========================================================================
@@ -8256,35 +8646,84 @@ LEFT JOIN (SELECT tablespace_name, SUM(bytes) AS free_bytes FROM dba_free_space 
 ORDER BY PCT_USED DESC;
 
 PROMPT ========================================================================
-PROMPT 4. Character Set Multi-Byte Expansion Risk Check (KO16MSWIN949 -> AL32UTF8)
+PROMPT 4. Character Set Expansion Risk Check (Source charset -> AL32UTF8)
 PROMPT ========================================================================
 SELECT parameter, value FROM nls_database_parameters WHERE parameter IN ('NLS_CHARACTERSET', 'NLS_NCHAR_CHARACTERSET', 'NLS_LENGTH_SEMANTICS');
 
+-- [FIX v09.04.00] (B23) 예전에는 "BYTE 컬럼이면서 2666 바이트 초과" 처럼 정의(길이)만
+--   보고 판정했다. 실제 넘치는 것은 "데이터를 AL32UTF8 로 바꾼 바이트 수 > 컬럼 길이"
+--   인 행이므로, VARCHAR2(10 BYTE) 에 한글 4자가 든 경우(8 -> 12 바이트)는 잡지 못하고
+--   비어 있는 큰 컬럼은 모두 위험으로 찍혔다. 실제 데이터를 변환 길이로 측정한다.
+--   ※ 테이블을 읽으므로 큰 DB 는 오래 걸린다. 정식 점검은 Oracle DMU 를 권장한다.
 PROMPT
-PROMPT >> Checking Columns at Risk of Truncation / ORA-12899 upon AL32UTF8 Conversion:
-PROMPT    (Columns defined with BYTE semantics or VARCHAR2 > 2666 bytes)
-COL OWNER FORMAT A20
-COL TABLE_NAME FORMAT A30
-COL COLUMN_NAME FORMAT A30
-COL DATA_TYPE FORMAT A15
-COL CHAR_USED FORMAT A5
-SELECT owner, table_name, column_name, data_type, data_length, char_length, char_used
-FROM dba_tab_cols
-WHERE data_type IN ('VARCHAR2', 'CHAR')
-  AND ( (char_used = 'B' AND data_length > 2666) OR (char_length > 1333) )
-  AND owner NOT IN ('SYS','SYSTEM','XDB','WMSYS','OJVMSYS','OUTLN','DBSNMP','AUDSYS','GSMADMIN_INTERNAL','APPQOSSYS')
-ORDER BY owner, table_name, column_id;
+PROMPT >> Measuring rows whose AL32UTF8 byte length exceeds the column limit (ORA-12899 at import):
+PROMPT    (scans table data - for very large databases use Oracle DMU instead)
+SET SERVEROUTPUT ON SIZE UNLIMITED
+DECLARE
+  v_cs    VARCHAR2(64);
+  v_lim   NUMBER;
+  v_cnt   NUMBER;
+  v_max   NUMBER;
+  v_cols  NUMBER := 0;
+  v_errs  NUMBER := 0;
+BEGIN
+  SELECT value INTO v_cs FROM nls_database_parameters WHERE parameter = 'NLS_CHARACTERSET';
+  IF v_cs IN ('AL32UTF8', 'UTF8') THEN
+    DBMS_OUTPUT.PUT_LINE('>> NLS_CHARACTERSET=' || v_cs || ' : no conversion to AL32UTF8 needed.');
+    RETURN;
+  END IF;
+  IF v_cs = 'US7ASCII' THEN
+    DBMS_OUTPUT.PUT_LINE('>> US7ASCII : 7-bit ASCII is 1 byte in AL32UTF8 (no expansion).');
+    DBMS_OUTPUT.PUT_LINE('   But 8-bit data stored by pass-through (e.g. Korean in US7ASCII) is lost on conversion.');
+    DBMS_OUTPUT.PUT_LINE('   Scan with Oracle DMU before migrating.');
+    RETURN;
+  END IF;
+  FOR c IN (SELECT tc.owner, tc.table_name, tc.column_name, tc.data_type, tc.data_length, tc.char_used
+              FROM dba_tab_cols tc
+              JOIN dba_tables t ON t.owner = tc.owner AND t.table_name = tc.table_name
+             WHERE tc.data_type IN ('VARCHAR2', 'CHAR')
+               AND tc.virtual_column = 'NO'
+               AND t.temporary = 'N'
+               AND (tc.owner, tc.table_name) NOT IN (SELECT owner, table_name FROM dba_external_tables)
+               AND $(ora_internal_excl "tc.owner")
+             ORDER BY tc.owner, tc.table_name, tc.column_id) LOOP
+    -- CHAR 의미(C) 컬럼은 문자 수가 아니라 저장 한도(VARCHAR2 4000 / CHAR 2000 바이트)에 걸린다
+    v_lim := CASE WHEN c.char_used = 'C' THEN CASE c.data_type WHEN 'CHAR' THEN 2000 ELSE 4000 END
+                  ELSE c.data_length END;
+    BEGIN
+      EXECUTE IMMEDIATE 'SELECT COUNT(*), NVL(MAX(LENGTHB(CONVERT("' || c.column_name || '", ''AL32UTF8''))), 0)'
+                     || ' FROM "' || c.owner || '"."' || c.table_name || '"'
+                     || ' WHERE LENGTHB(CONVERT("' || c.column_name || '", ''AL32UTF8'')) > :lim'
+        INTO v_cnt, v_max USING v_lim;
+      IF v_cnt > 0 THEN
+        v_cols := v_cols + 1;
+        DBMS_OUTPUT.PUT_LINE(RPAD(c.owner || '.' || c.table_name || '.' || c.column_name, 70)
+          || ' ' || c.data_type || '(' || c.data_length || ' ' || CASE c.char_used WHEN 'C' THEN 'CHAR' ELSE 'BYTE' END || ')'
+          || ' rows=' || v_cnt || ' max_bytes_after=' || v_max);
+      END IF;
+    EXCEPTION WHEN OTHERS THEN
+      v_errs := v_errs + 1;
+      DBMS_OUTPUT.PUT_LINE(RPAD(c.owner || '.' || c.table_name || '.' || c.column_name, 70) || ' CHECK FAILED: ' || SQLERRM);
+    END;
+  END LOOP;
+  DBMS_OUTPUT.PUT_LINE('>> NLS_CHARACTERSET=' || v_cs || ' : ' || v_cols || ' column(s) will overflow, '
+                       || v_errs || ' column(s) could not be checked.');
+  IF v_cols > 0 THEN
+    DBMS_OUTPUT.PUT_LINE('   Widen these columns on the target (or use CHAR semantics) before import.');
+  END IF;
+END;
+/
 
 PROMPT ========================================================================
 PROMPT 5. Unusable Indexes & Disabled Constraints Check
 PROMPT ========================================================================
 SELECT owner, index_name, table_name, status 
 FROM dba_indexes 
-WHERE status = 'UNUSABLE' AND owner NOT IN ('SYS','SYSTEM');
+WHERE status = 'UNUSABLE' AND $(ora_internal_excl "owner");
 
 SELECT owner, constraint_name, table_name, status 
 FROM dba_constraints 
-WHERE status = 'DISABLED' AND owner NOT IN ('SYS','SYSTEM');
+WHERE status = 'DISABLED' AND $(ora_internal_excl "owner");
 
 SPOOL OFF
 EXIT;
@@ -8292,6 +8731,7 @@ EOF
 
     cat <<EOF > "$DIAG_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -8444,6 +8884,7 @@ EOF
 
     cat <<EOF > "$APPLY_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -8467,6 +8908,7 @@ EOF
 
     cat <<EOF > "$RESTORE_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -8556,7 +8998,7 @@ SELECT owner, object_type,
        COUNT(CASE WHEN status = 'INVALID' THEN 1 END) AS INVALID_COUNT,
        COUNT(*) AS TOTAL_COUNT
 FROM dba_objects
-WHERE owner NOT IN ('SYS','SYSTEM','XDB','WMSYS','OJVMSYS','OUTLN','DBSNMP','AUDSYS','GSMADMIN_INTERNAL','APPQOSSYS')
+WHERE $(ora_internal_excl "owner")
 GROUP BY owner, object_type
 ORDER BY owner, object_type;
 
@@ -8570,7 +9012,7 @@ SELECT owner, table_name, constraint_name, status, validated
 FROM dba_constraints
 WHERE constraint_type = 'R'
   AND status = 'DISABLED'
-  AND owner NOT IN ('SYS','SYSTEM','XDB','WMSYS','AUDSYS')
+  AND $(ora_internal_excl "owner")
 ORDER BY owner, table_name;
 
 PROMPT ========================================================================
@@ -8580,7 +9022,7 @@ COL INDEX_NAME FORMAT A30
 SELECT owner, index_name, table_name, status
 FROM dba_indexes
 WHERE status = 'UNUSABLE'
-  AND owner NOT IN ('SYS','SYSTEM','XDB','WMSYS','AUDSYS')
+  AND $(ora_internal_excl "owner")
 ORDER BY owner, table_name;
 
 PROMPT ========================================================================
@@ -8591,7 +9033,7 @@ COL LAST_NUMBER FORMAT 999,999,999,999
 COL CACHE_SIZE FORMAT 999,999
 SELECT sequence_owner, sequence_name, last_number, cache_size, increment_by
 FROM dba_sequences
-WHERE sequence_owner NOT IN ('SYS','SYSTEM','XDB','WMSYS','AUDSYS')
+WHERE $(ora_internal_excl "sequence_owner")
 ORDER BY sequence_owner, sequence_name;
 
 SPOOL OFF
@@ -8701,6 +9143,7 @@ EOF
 
     cat <<EOF > "$INT_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -8770,7 +9213,7 @@ EXCLEOF
         _bx_list=""
         IFS_BACKUP=$IFS; IFS=","
         for _bx in $DEEP_EXTRA_EXCLUDE; do
-            _bx=$(echo "$_bx" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+            _bx=$(echo "$_bx" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
             [ -n "$_bx" ] && _bx_list="${_bx_list},'${_bx}'"
         done
         IFS=$IFS_BACKUP
@@ -8794,7 +9237,7 @@ USER_STATUS|SECURITY|MUST_MATCH
 PRIVS_TAB_UTOU|SECURITY|MUST_MATCH
 PRIVS_TAB_STOU|SECURITY|MUST_MATCH
 PUB_TAB_UTOP|SECURITY|MUST_MATCH
-PUB_TAB_STOP|SECURITY|MUST_MATCH
+PUB_TAB_STOP|SECURITY|INFORMATIONAL
 PUB_SYNONYM|OBJECT|MUST_MATCH
 OBJ_STATUS|OBJECT|MUST_MATCH
 OBJ_INVALID|OBJECT|MUST_MATCH
@@ -8832,11 +9275,11 @@ select profile, resource_name, resource_type, "LIMIT" from dba_profiles@@L@@
 Q
     ;;
     SYS_PRIVS) cat <<'Q'
-select grantee, privilege, admin_option from dba_sys_privs@@L@@ where grantee not in (@@EXCL@@)
+select grantee, privilege, admin_option from dba_sys_privs@@L@@ where grantee not in (@@EXCL@@) and @@USERONLY:grantee@@
 Q
     ;;
     ROLE_PRIVS) cat <<'Q'
-select grantee, granted_role, admin_option, default_role from dba_role_privs@@L@@ where grantee not in (@@EXCL@@)
+select grantee, granted_role, admin_option, default_role from dba_role_privs@@L@@ where grantee not in (@@EXCL@@) and @@USERONLY:grantee@@
 Q
     ;;
     USER_QUOTAS) cat <<'Q'
@@ -8856,7 +9299,7 @@ select grantor, privilege, owner, table_name, grantee, grantable from dba_tab_pr
 Q
     ;;
     PRIVS_TAB_STOU) cat <<'Q'
-select grantor, privilege, owner, table_name, grantee, grantable from dba_tab_privs@@L@@ where grantee <> 'PUBLIC' and owner in ('SYS','SYSTEM') and grantee not in (@@EXCL@@)
+select grantor, privilege, owner, table_name, grantee, grantable from dba_tab_privs@@L@@ where grantee <> 'PUBLIC' and owner in ('SYS','SYSTEM') and grantee not in (@@EXCL@@) and @@USERONLY:grantee@@
 Q
     ;;
     PUB_TAB_UTOP) cat <<'Q'
@@ -8872,7 +9315,7 @@ select synonym_name, table_owner, table_name, db_link from dba_synonyms@@L@@ whe
 Q
     ;;
     OBJ_STATUS) cat <<'Q'
-select owner, object_type, count(*) obj_cnt from dba_objects@@L@@ where owner not in (@@EXCL@@) group by owner, object_type
+select owner, object_type, count(*) obj_cnt from dba_objects@@L@@ where owner not in (@@EXCL@@) @@SNAPX:object_name@@ group by owner, object_type
 Q
     ;;
     OBJ_INVALID) cat <<'Q'
@@ -8880,7 +9323,7 @@ select owner, object_name, object_type from dba_objects@@L@@ where status = 'INV
 Q
     ;;
     OBJ_TAB_TOTAL) cat <<'Q'
-select owner, table_name, iot_type, partitioned from dba_tables@@L@@ where owner not in (@@EXCL@@)
+select owner, table_name, iot_type, partitioned from dba_tables@@L@@ where owner not in (@@EXCL@@) @@SNAPX:table_name@@
 Q
     ;;
     OBJ_TABP_TOTAL) cat <<'Q'
@@ -8888,15 +9331,15 @@ select table_owner, table_name, partition_name from dba_tab_partitions@@L@@ wher
 Q
     ;;
     OBJ_LOB_TOTAL) cat <<'Q'
-select owner, table_name, column_name, segment_name from dba_lobs@@L@@ where owner not in (@@EXCL@@)
+select owner, table_name, column_name, case when segment_name like 'SYS' || chr(95) || 'LOB%' then 'SYS_LOB(GENERATED)' else segment_name end segment_name from dba_lobs@@L@@ where owner not in (@@EXCL@@)
 Q
     ;;
     OBJ_IDX_TOTAL) cat <<'Q'
-select owner, index_name, table_owner, table_name, index_type, uniqueness from dba_indexes@@L@@ where owner not in (@@EXCL@@)
+select owner, case when generated = 'Y' then 'SYS(GENERATED)' else index_name end index_name, table_owner, table_name, index_type, uniqueness, count(*) idx_cnt from dba_indexes@@L@@ where owner not in (@@EXCL@@) and index_type <> 'LOB' group by owner, case when generated = 'Y' then 'SYS(GENERATED)' else index_name end, table_owner, table_name, index_type, uniqueness
 Q
     ;;
     OBJ_IDX_LOB) cat <<'Q'
-select owner, index_name, table_owner, table_name from dba_indexes@@L@@ where index_type = 'LOB' and owner not in (@@EXCL@@)
+select owner, table_owner, table_name, count(*) lob_idx_cnt from dba_indexes@@L@@ where index_type = 'LOB' and owner not in (@@EXCL@@) group by owner, table_owner, table_name
 Q
     ;;
     OBJ_DEPENDENCY) cat <<'Q'
@@ -8904,7 +9347,7 @@ select owner, name, type, referenced_owner, referenced_name, referenced_type fro
 Q
     ;;
     OBJ_DBLINK) cat <<'Q'
-select owner, db_link, username, host from dba_db_links@@L@@
+select owner, db_link, username, host from dba_db_links@@L@@ where @@NOTLINK:db_link@@
 Q
     ;;
     OBJ_CONSTRAINT) cat <<'Q'
@@ -8928,11 +9371,11 @@ select tablespace_name, status, autoextensible, count(*) file_cnt from dba_data_
 Q
     ;;
     OBJ_SEGSIZE) cat <<'Q'
-select owner, segment_type, count(*) seg_cnt, sum(bytes) total_bytes from dba_segments@@L@@ where owner not in (@@EXCL@@) group by owner, segment_type
+select owner, segment_type, count(*) seg_cnt, sum(bytes) total_bytes from dba_segments@@L@@ where owner not in (@@EXCL@@) @@SNAPX:segment_name@@ group by owner, segment_type
 Q
     ;;
     TAB_STATS) cat <<'Q'
-select owner, table_name, num_rows from dba_tab_statistics@@L@@ where owner not in (@@EXCL@@) and object_type = 'TABLE'
+select owner, table_name, num_rows from dba_tab_statistics@@L@@ where owner not in (@@EXCL@@) and object_type = 'TABLE' @@SNAPX:table_name@@
 Q
     ;;
     IDX_STATS) cat <<'Q'
@@ -8940,7 +9383,7 @@ select owner, index_name, num_rows, distinct_keys from dba_ind_statistics@@L@@ w
 Q
     ;;
     OBJ_STATISTICS) cat <<'Q'
-select owner, stattype_locked, count(*) locked_cnt from dba_tab_statistics@@L@@ where owner not in (@@EXCL@@) group by owner, stattype_locked
+select owner, stattype_locked, count(*) locked_cnt from dba_tab_statistics@@L@@ where owner not in (@@EXCL@@) @@SNAPX:table_name@@ group by owner, stattype_locked
 Q
     ;;
     *) echo "select 1 unknown_entry from dual" ;;
@@ -8948,11 +9391,24 @@ Q
 }
 
 # @@L@@ / @@EXCL@@ 치환된 최종 SELECT 반환
+#   [FIX v09.04.00] (B16) 정상 이관에서도 FAIL 로 나오던 항목 보정용 치환자
+#     @@USERONLY:col@@ -> col 이 (제외 대상이 아닌) 사용자일 때만. 롤(DBA 등)에 대한
+#                         권한은 DB 버전마다 달라서 MUST_MATCH 로 비교하면 항상 틀린다.
+#     @@SNAPX:col@@    -> 이 도구가 접속 계정 스키마에 만든 스냅샷 테이블(AS_/TO_/MIG_)
+#                         을 뺀다. 접속 계정이 내부 계정이 아니면 TOBE 쪽에만 생겨 FAIL 이었다.
+#     @@NOTLINK:col@@  -> 검증용 DB Link(DEEP_LINK_NAME) / 이관용 링크(DBLINK_NAME) 제외
+#   LOB 세그먼트(SYS_LOB...)와 LOB/시스템 생성 인덱스(SYS_IL..., SYS_C...) 이름은
+#   impdp 가 새로 만들기 때문에 이름이 아니라 개수로 비교한다.
 deep_diff_select_sql() {
     _dd_entry="$1"
     _dd_link="$2"
+    _dd_l1=$(echo "${DEEP_LINK_NAME:-~}" | tr '[:lower:]' '[:upper:]' | sed "s/'/''/g")
+    _dd_l2=$(echo "${DBLINK_NAME:-~}" | tr '[:lower:]' '[:upper:]' | sed "s/'/''/g")
     deep_diff_raw_sql "$_dd_entry" \
         | sed -e "s|@@L@@|${_dd_link}|g" -e "s|@@EXCL@@|${DEEP_EXCL_OWNERS}|g" \
+              -e "s|@@USERONLY:\([a-z_]*\)@@|\1 in (select username from dba_users${_dd_link})|g" \
+              -e "s|@@SNAPX:\([a-z_]*\)@@|and not (owner = user and (substr(\1, 1, 3) in ('AS_', 'TO_') or substr(\1, 1, 4) = 'MIG_'))|g" \
+              -e "s|@@NOTLINK:\([a-z_]*\)@@|upper(\1) not in ('${_dd_l1}', '${_dd_l2}') and upper(\1) not like '${_dd_l1}.%' and upper(\1) not like '${_dd_l2}.%'|g" \
         | sed '/^[[:space:]]*$/d'
 }
 
@@ -8987,7 +9443,7 @@ generate_deep_diff_scripts() {
 --  ※ 양쪽 스냅샷을 "동일한 SELECT 텍스트"로 생성하므로 DB 버전이 달라도
 --     컬럼 구성이 항상 일치한다 -> MINUS 시 ORA-01789 가 발생하지 않는다.
 -- ==============================================================================
-SET ECHO ON LOGONLY SERVEROUTPUT ON SIZE UNLIMITED LINES 300 TRIMSPOOL ON
+SET ECHO ON SERVEROUTPUT ON SIZE UNLIMITED LINES 300 TRIMSPOOL ON
 WHENEVER SQLERROR CONTINUE
 SPOOL deepdiff_1_gather_${UNIQUE_ID}.log
 
@@ -9186,6 +9642,7 @@ EOF
         _ds=$(echo "$_dd_pair" | cut -d':' -f3)
         cat <<EOF > "$_sh"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -9212,6 +9669,7 @@ EOF
     echo "  * 생성 중: $DD_DETAIL_SH (차이 상세 드릴다운)"
     cat <<EOF > "$DD_DETAIL_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  DEEP DIFF Step 3 : 특정 항목의 실제 차이 내역 조회
 #  사용법 : bash $(basename "$DD_DETAIL_SH") [ENTRY_NAME]
@@ -9227,6 +9685,7 @@ V_ENTRY="\$1"
 if [ -z "\$V_ENTRY" ]; then
     sqlplus -S /nolog <<'SQLEOF'
 connect $DB_CONN
+$PDB_SWITCH_SQL
 SET LINES 220 PAGES 1000
 COL ENTRY_NAME FORMAT A22
 COL SEVERITY   FORMAT A14
@@ -9247,10 +9706,15 @@ if [ -z "\$V_ENTRY" ]; then
     exit 1
 fi
 
-V_ENTRY=\$(echo "\$V_ENTRY" | tr 'a-z' 'A-Z')
+V_ENTRY=\$(echo "\$V_ENTRY" | tr '[:lower:]' '[:upper:]')
+# [FIX v09.04.00] 입력값이 그대로 테이블명에 들어가므로 영문/숫자/_ 만 허용
+case "\$V_ENTRY" in
+    *[!A-Z0-9_]*) echo ">> 잘못된 ENTRY_NAME: \$V_ENTRY"; exit 1 ;;
+esac
 
 sqlplus -S /nolog <<SQLEOF
 connect $(hd_esc "$DB_CONN")
+$(hd_esc "$PDB_SWITCH_SQL")
 SET LINES 32767 PAGES 500 TRIMSPOOL ON TRIMOUT ON
 -- ==============================================================================
 -- [FIX v08.04] 12.2 부터 식별자가 VARCHAR2(128) 이라 SQL*Plus 가 컬럼마다
@@ -9519,6 +9983,21 @@ CREATE TABLE &PFX._TAB_CNT (
   TOTAL_COUNT NUMBER
 ) TABLESPACE ${_rc_tbs};
 
+-- [v09.04.00] (개선11) 카운트가 실패한 테이블이 결과에서 사라지지 않도록 대상 테이블마다
+--   자리 행(TOTAL_COUNT NULL)을 먼저 넣는다. 카운트가 성공하면 같은 키에 값 행이 추가되어
+--   MAX 집계로 값이 잡히고, 실패하면 NULL 만 남아 비교에서 COUNT_ERROR 로 드러난다.
+INSERT INTO &PFX._TAB_CNT (owner, table_name, part_name, total_count)
+SELECT t.owner, t.table_name, NULL, NULL
+  FROM dba_tables t
+ WHERE t.owner NOT IN (${DEEP_EXCL_OWNERS})
+   AND t.temporary = 'N'
+   AND t.secondary = 'N'
+   AND t.nested    = 'NO'
+   AND t.table_name NOT LIKE 'BIN' || CHR(36) || '%'
+   AND NOT EXISTS (SELECT 1 FROM dba_external_tables x
+                    WHERE x.owner = t.owner AND x.table_name = t.table_name);
+COMMIT;
+
 PROMPT >> 카운트 대상 목록을 &PFX._TAB_CNT_STMT.sql 로 생성합니다...
 SPOOL &PFX._TAB_CNT_STMT.sql
 
@@ -9554,6 +10033,7 @@ EOF
     echo "  * 생성 중: $RC_SPLIT_SH (앵커링된 버킷 분할)"
     cat <<EOF > "$RC_SPLIT_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  ROW COUNT Step 2 : 버킷별 실행 스크립트 분할
 #  사용법 : bash $(basename "$RC_SPLIT_SH") <PREFIX>       (PREFIX = AS | TO)
@@ -9604,6 +10084,7 @@ EOF
     echo "  * 생성 중: $RC_EXEC_SH (병렬 실행 + 완료 감지)"
     cat <<EOF > "$RC_EXEC_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  ROW COUNT Step 3 : 버킷 병렬 실행
 #  사용법 : bash $(basename "$RC_EXEC_SH") <PREFIX> [동시실행수]
@@ -9768,8 +10249,10 @@ SELECT NVL(a.owner, t.owner)           AS OWNER,
        a.cnt                           AS ASIS_COUNT,
        t.cnt                           AS TOBE_COUNT,
        NVL(t.cnt,0) - NVL(a.cnt,0)     AS DIFF_CNT,
-       CASE WHEN a.cnt IS NULL           THEN 'ONLY_IN_TOBE'
-            WHEN t.cnt IS NULL           THEN 'MISSING_IN_TOBE'
+       CASE WHEN a.owner IS NULL         THEN 'ONLY_IN_TOBE'
+            WHEN t.owner IS NULL         THEN 'MISSING_IN_TOBE'
+            -- [v09.04.00] (개선11) 자리 행만 있고 값이 없음 = 카운트 실패
+            WHEN a.cnt IS NULL OR t.cnt IS NULL THEN 'COUNT_ERROR'
             WHEN a.cnt = t.cnt           THEN 'MATCH'
             ELSE 'MISMATCH' END         AS STATUS
 FROM a FULL OUTER JOIN t
@@ -9785,7 +10268,7 @@ PROMPT ========================================================================
 SELECT owner, table_name, asis_count, tobe_count, diff_cnt, status
 FROM MIG_ROWCOUNT_DIFF
 WHERE status <> 'MATCH'
-ORDER BY DECODE(status,'MISSING_IN_TOBE',1,'MISMATCH',2,3), ABS(NVL(diff_cnt,0)) DESC;
+ORDER BY DECODE(status,'COUNT_ERROR',0,'MISSING_IN_TOBE',1,'MISMATCH',2,3), ABS(NVL(diff_cnt,0)) DESC;
 
 PROMPT
 PROMPT ========================================================================
@@ -9840,7 +10323,7 @@ PROMPT ========================================================================
 SELECT owner, table_name, part_name, asis_count, tobe_count, diff_cnt, status
 FROM MIG_ROWCOUNT_PART_DIFF
 WHERE status <> 'MATCH'
-ORDER BY DECODE(status,'MISSING_IN_TOBE',1,'MISMATCH',2,3), ABS(NVL(diff_cnt,0)) DESC;
+ORDER BY DECODE(status,'COUNT_ERROR',0,'MISSING_IN_TOBE',1,'MISMATCH',2,3), ABS(NVL(diff_cnt,0)) DESC;
 
 PROMPT
 PROMPT ========================================================================
@@ -9876,6 +10359,7 @@ EOF
 
     cat <<EOF > "$RC_CMP_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -9895,6 +10379,7 @@ EOF
     echo "  * 생성 중: $RC_STOP_SH (이 작업의 세션만 한정 종료)"
     cat <<EOF > "$RC_STOP_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  ROW COUNT : 진행 중인 건수 수집 작업만 안전하게 중지
 #
@@ -9995,7 +10480,7 @@ setup_deep_dblink() {
     fi
     _read DEEP_LINK_NAME
     [ -z "$DEEP_LINK_NAME" ] && DEEP_LINK_NAME="MIG_LINK"
-    DEEP_LINK_NAME=$(echo "$DEEP_LINK_NAME" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+    DEEP_LINK_NAME=$(echo "$DEEP_LINK_NAME" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
 
     # [FIX v09.02] MOCK 우회 경로 점검 — v09.01 까지는 여기서 그냥 return 0 했다.
     #   그 결과 DB Link 생성 DDL 을 만드는 코드가 MOCK 에서 한 번도 타지 않아,
@@ -10115,8 +10600,8 @@ run_deep_diff_mode() {
     fetch_db_info
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Job ID [Default: DEEP_${DATE_STR}]: "
-    else printf "  작업 ID를 입력하세요 [기본값: DEEP_${DATE_STR}]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Job ID [Default: DEEP_%s]: " "${DATE_STR}"
+    else printf "  작업 ID를 입력하세요 [기본값: DEEP_%s]: " "${DATE_STR}"; fi
     _read user_id
     if [ -z "$user_id" ]; then UNIQUE_ID="DEEP_${DATE_STR}"; else UNIQUE_ID=$(echo "$user_id" | tr ' ' '_'); fi
 
@@ -10183,8 +10668,9 @@ run_deep_diff_mode() {
 #     RAW           RAWTOHEX
 #     NULL          '~N~' 센티널                 NULL 연결로 값이 사라지는 것 방지
 #
-#  제외 대상: LOB / LONG / BFILE / XMLTYPE / 사용자정의타입
-#     해시 대상에서 빼고, 제외한 컬럼 수를 결과에 기록한다.
+#  제외 대상: 위 표에 없는 모든 타입 (LOB / LONG / BFILE / XMLTYPE / JSON / BOOLEAN /
+#     VECTOR / 사용자정의타입 등). 해시 대상에서 빼고, 제외한 컬럼 수를 결과에 기록한다.
+#  CHAR / NCHAR  RTRIM(CONVERT(col,'AL32UTF8'))  [v09.04.00] 채움 공백 차이 제거
 # ==============================================================================
 generate_hash_scripts() {
     # [v09.02] local 제거 (ksh 비호환): _hs_tbs _hs_fn _hs_pre _hs_post
@@ -10252,79 +10738,145 @@ CREATE TABLE &PFX._TAB_HASH (
   SKIP_CNT    NUMBER
 ) TABLESPACE ${_hs_tbs};
 
+-- [FIX v09.04.00] (E6/B17) 수집문 생성 방식 변경
+--   예전에는 XMLAGG(...).EXTRACT('//text()') 로 컬럼식을 이어 붙였는데,
+--     1) EXTRACT 가 따옴표 등을 XML 엔티티(apos 등)로 돌려줘 생성 SQL 이 깨졌고
+--     2) 한 행의 모든 컬럼을 하나의 문자열로 이어 해시해 합이 4000 바이트를 넘는
+--        넓은 테이블은 ORA-01489 로 실패했으며
+--     3) 문장 하나가 한 줄이라 SQL*Plus 줄 길이 제한에 걸렸고
+--     4) 처리하지 못하는 타입(JSON/BOOLEAN/VECTOR 등)은 CASE 가 NULL 이 되어 "||||" 로 깨졌다.
+--   이제 PL/SQL 로 직접 문장을 만들고(이스케이프 없음), 컬럼을 3900 바이트 이하 묶음으로
+--   나눠 묶음별로 해시한 뒤 (2k+1) 가중합으로 행 해시를 만든다. 한 줄에 컬럼 하나씩 쓴다.
+--   CHAR/NCHAR 는 문자셋이 바뀌면 채움 공백 수가 달라질 수 있어 RTRIM 후 비교한다.
+--   해시가 실패한 테이블이 결과에서 사라지지 않도록, 미리 자리 행(ROW_CNT NULL)을
+--   넣어 두고 수집문은 그 행을 UPDATE 한다. 실패하면 HASH_ERROR 로 남는다.
+PROMPT >> 테이블별 해시 수집문을 만듭니다...
+DROP TABLE &PFX._HASH_STMT PURGE;
+CREATE TABLE &PFX._HASH_STMT (
+  SEQ     NUMBER,
+  LINE_NO NUMBER,
+  BUCKET  NUMBER,
+  TXT     VARCHAR2(4000)
+) TABLESPACE ${_hs_tbs};
+
+DECLARE
+  v_seq    NUMBER := 0;
+  v_line   NUMBER := 0;
+  v_bucket NUMBER := 0;
+  v_chunk  NUMBER;
+  v_cw     NUMBER;
+  v_ccols  NUMBER;
+  v_w      NUMBER;
+  v_cols   NUMBER;
+  v_skip   NUMBER;
+  v_expr   VARCHAR2(1000);
+  v_q      VARCHAR2(300);
+  PROCEDURE put(p_txt VARCHAR2) IS
+  BEGIN
+    v_line := v_line + 1;
+    INSERT INTO &PFX._HASH_STMT VALUES (v_seq, v_line, v_bucket, p_txt);
+  END;
+BEGIN
+  FOR t IN (SELECT tb.owner, tb.table_name,
+                   (SELECT NVL(SUM(s.bytes), 0) FROM dba_segments s
+                     WHERE s.owner = tb.owner AND s.segment_name = tb.table_name) AS sort_bytes
+              FROM dba_tables tb
+             WHERE tb.owner NOT IN (${DEEP_EXCL_OWNERS})
+               AND tb.table_name NOT LIKE 'BIN' || CHR(36) || '%'
+               AND tb.temporary = 'N' AND tb.secondary = 'N' AND tb.nested = 'NO'
+               AND NVL(tb.iot_type, 'X') <> 'IOT_OVERFLOW'
+               AND NOT EXISTS (SELECT 1 FROM dba_external_tables x
+                                WHERE x.owner = tb.owner AND x.table_name = tb.table_name)
+             ORDER BY 3 DESC, 1, 2) LOOP
+    SELECT COUNT(CASE WHEN c.data_type_owner IS NULL
+                       AND (c.data_type IN ('VARCHAR2','CHAR','NVARCHAR2','NCHAR','NUMBER','FLOAT',
+                                            'BINARY_FLOAT','BINARY_DOUBLE','DATE','RAW')
+                            OR c.data_type LIKE 'TIMESTAMP%' OR c.data_type LIKE 'INTERVAL%') THEN 1 END),
+           COUNT(*)
+      INTO v_cols, v_skip
+      FROM dba_tab_columns c
+     WHERE c.owner = t.owner AND c.table_name = t.table_name;
+    v_skip := v_skip - v_cols;
+
+    IF v_cols > 0 THEN
+      v_seq := v_seq + 1;
+      v_line := 0;
+      v_bucket := MOD(v_seq, ${HASH_BUCKETS});
+      v_q := '"' || t.owner || '"."' || t.table_name || '"';
+      INSERT INTO &PFX._TAB_HASH (owner, table_name, col_cnt, skip_cnt)
+      VALUES (t.owner, t.table_name, v_cols, v_skip);
+
+      put('update &PFX._TAB_HASH set (row_cnt, hash_sum, hash_min, hash_max) = (');
+      put('select count(*), nvl(sum(h), 0), nvl(min(h), 0), nvl(max(h), 0) from (select /*+ parallel(${HASH_PDEG}) */ 0');
+      v_chunk := 0; v_cw := 0; v_ccols := 0;
+      FOR c IN (SELECT column_name, data_type, data_length, char_length, char_used
+                  FROM dba_tab_columns
+                 WHERE owner = t.owner AND table_name = t.table_name
+                   AND data_type_owner IS NULL
+                   AND (data_type IN ('VARCHAR2','CHAR','NVARCHAR2','NCHAR','NUMBER','FLOAT',
+                                      'BINARY_FLOAT','BINARY_DOUBLE','DATE','RAW')
+                        OR data_type LIKE 'TIMESTAMP%' OR data_type LIKE 'INTERVAL%')
+                 ORDER BY column_id) LOOP
+        -- 변환 후 최대 바이트 (보수적으로). N 타입은 연결 결과가 NVARCHAR2 가 되므로 혼자 둔다.
+        v_w := CASE
+                 WHEN c.data_type IN ('NVARCHAR2','NCHAR') THEN 4000
+                 WHEN c.data_type IN ('VARCHAR2','CHAR') THEN
+                   LEAST(3900, CASE c.char_used WHEN 'C' THEN c.char_length * 4 ELSE c.data_length * 3 END)
+                 WHEN c.data_type = 'RAW' THEN c.data_length * 2
+                 ELSE 64
+               END + 4;
+        IF v_ccols > 0 AND v_cw + v_w > 3900 THEN
+          put('  ${_hs_post}');
+          v_chunk := v_chunk + 1; v_cw := 0; v_ccols := 0;
+        END IF;
+        v_expr := CASE
+          WHEN c.data_type IN ('CHAR','NCHAR')
+            THEN 'NVL2("' || c.column_name || '", RTRIM(CONVERT("' || c.column_name || '", ''AL32UTF8'')) || ''.'', ''~N~'')'
+          WHEN c.data_type IN ('VARCHAR2','NVARCHAR2')
+            THEN 'NVL(CONVERT("' || c.column_name || '", ''AL32UTF8''), ''~N~'')'
+          WHEN c.data_type = 'DATE'
+            THEN 'NVL(TO_CHAR("' || c.column_name || '", ''YYYYMMDDHH24MISS''), ''~N~'')'
+          WHEN c.data_type LIKE 'TIMESTAMP%TIME ZONE'
+            THEN 'NVL(TO_CHAR(SYS_EXTRACT_UTC("' || c.column_name || '"), ''YYYYMMDDHH24MISSFF9''), ''~N~'')'
+          WHEN c.data_type LIKE 'TIMESTAMP%'
+            THEN 'NVL(TO_CHAR("' || c.column_name || '", ''YYYYMMDDHH24MISSFF9''), ''~N~'')'
+          WHEN c.data_type = 'RAW'
+            THEN 'NVL(RAWTOHEX("' || c.column_name || '"), ''~N~'')'
+          ELSE 'NVL(TO_CHAR("' || c.column_name || '"), ''~N~'')'
+        END;
+        IF v_ccols = 0 THEN
+          put('  + ' || (2 * v_chunk + 1) || ' * ${_hs_pre}' || v_expr);
+        ELSE
+          put('    || ''|'' || ' || v_expr);
+        END IF;
+        v_ccols := v_ccols + 1;
+        v_cw := v_cw + v_w;
+      END LOOP;
+      put('  ${_hs_post}');
+      put('  h from ' || v_q || '))');
+      put(' where owner = ''' || REPLACE(t.owner, '''', '''''') || ''' and table_name = '''
+          || REPLACE(t.table_name, '''', '''''') || ''';');
+    END IF;
+  END LOOP;
+  COMMIT;
+END;
+/
+
 PROMPT >> 해시 수집문을 &PFX._TAB_HASH_STMT.sql 로 생성합니다...
 SPOOL &PFX._TAB_HASH_STMT.sql
-
-SELECT MOD(ROWNUM, ${HASH_BUCKETS}) || '#' || stmt
-FROM (
-  SELECT 'insert into &PFX._TAB_HASH select ''' || x.owner || ''',''' || x.table_name || ''',' ||
-         'count(*),' ||
-         'nvl(sum(h),0),' ||
-         'nvl(min(h),0),' ||
-         'nvl(max(h),0),' ||
-         x.col_cnt || ',' || x.skip_cnt ||
-         ' from (select /*+ parallel(${HASH_PDEG}) */ ' ||
-         '${_hs_pre}' || x.expr || '${_hs_post} h from "' ||
-         x.owner || '"."' || x.table_name || '");' AS stmt,
-         x.sort_bytes
-  FROM (
-    SELECT c.owner, c.table_name,
-           -- LISTAGG 는 VARCHAR2 4000 제한이 있어 넓은 테이블에서 잘린다.
-           -- XMLAGG 는 CLOB 이라 제한이 없다 (11g 이상 공통).
-           RTRIM(XMLAGG(XMLELEMENT(e,
-             CASE
-               WHEN c.data_type IN ('VARCHAR2','CHAR','NVARCHAR2','NCHAR')
-                 THEN 'NVL(CONVERT("' || c.column_name || '",''AL32UTF8''),''~N~'')'
-               WHEN c.data_type IN ('NUMBER','FLOAT','BINARY_FLOAT','BINARY_DOUBLE')
-                 THEN 'NVL(TO_CHAR("' || c.column_name || '"),''~N~'')'
-               WHEN c.data_type = 'DATE'
-                 THEN 'NVL(TO_CHAR("' || c.column_name || '",''YYYYMMDDHH24MISS''),''~N~'')'
-               WHEN c.data_type LIKE 'TIMESTAMP%TIME ZONE'
-                 THEN 'NVL(TO_CHAR(SYS_EXTRACT_UTC("' || c.column_name || '"),''YYYYMMDDHH24MISSFF9''),''~N~'')'
-               WHEN c.data_type LIKE 'TIMESTAMP%'
-                 THEN 'NVL(TO_CHAR("' || c.column_name || '",''YYYYMMDDHH24MISSFF9''),''~N~'')'
-               WHEN c.data_type = 'RAW'
-                 THEN 'NVL(RAWTOHEX("' || c.column_name || '"),''~N~'')'
-               WHEN c.data_type LIKE 'INTERVAL%'
-                 THEN 'NVL(TO_CHAR("' || c.column_name || '"),''~N~'')'
-             END || '||''|''||'
-           ).EXTRACT('//text()') ORDER BY c.column_id).GETCLOBVAL(), '||''|''||') AS expr,
-           COUNT(*) AS col_cnt,
-           (SELECT COUNT(*) FROM dba_tab_columns c2
-             WHERE c2.owner = c.owner AND c2.table_name = c.table_name
-               AND (c2.data_type IN ('CLOB','NCLOB','BLOB','BFILE','LONG','LONG RAW','ROWID','UROWID','XMLTYPE')
-                    OR c2.data_type_owner IS NOT NULL)) AS skip_cnt,
-           (SELECT NVL(SUM(s.bytes), 0) FROM dba_segments s
-             WHERE s.owner = c.owner AND s.segment_name = c.table_name) AS sort_bytes
-    FROM dba_tab_columns c
-    WHERE c.owner NOT IN (${DEEP_EXCL_OWNERS})
-      AND c.data_type_owner IS NULL
-      AND c.data_type NOT IN ('CLOB','NCLOB','BLOB','BFILE','LONG','LONG RAW','ROWID','UROWID','XMLTYPE')
-      AND c.table_name NOT LIKE 'BIN' || CHR(36) || '%'
-      AND EXISTS (SELECT 1 FROM dba_tables t
-                   WHERE t.owner = c.owner AND t.table_name = c.table_name
-                     AND t.temporary = 'N' AND t.secondary = 'N' AND t.nested = 'NO'
-                     AND NOT EXISTS (SELECT 1 FROM dba_external_tables x
-                                      WHERE x.owner = t.owner AND x.table_name = t.table_name))
-    GROUP BY c.owner, c.table_name
-  ) x
-  WHERE x.expr IS NOT NULL
-  ORDER BY x.sort_bytes DESC
-);
-
+SELECT bucket || '#' || txt FROM &PFX._HASH_STMT ORDER BY seq, line_no;
 SPOOL OFF
 
 PROMPT
-PROMPT >> 해시 대상에서 제외된 컬럼 (LOB/LONG/XMLType/사용자정의타입)
+PROMPT >> 해시 대상에서 제외된 컬럼 (LOB/LONG/XMLType/JSON/BOOLEAN/VECTOR/사용자정의타입 등)
 COL OWNER FORMAT A20
 COL TABLE_NAME FORMAT A30
-SELECT owner, table_name, COUNT(*) AS skipped_cols
-  FROM dba_tab_columns
- WHERE owner NOT IN (${DEEP_EXCL_OWNERS})
-   AND (data_type IN ('CLOB','NCLOB','BLOB','BFILE','LONG','LONG RAW','ROWID','UROWID','XMLTYPE')
-        OR data_type_owner IS NOT NULL)
- GROUP BY owner, table_name
+SELECT owner, table_name, skip_cnt AS skipped_cols
+  FROM &PFX._TAB_HASH
+ WHERE skip_cnt > 0
  ORDER BY 3 DESC, 1, 2;
+
+SELECT 'TABLES=' || COUNT(*) AS hash_targets FROM &PFX._TAB_HASH;
 
 EXIT;
 EOF
@@ -10342,6 +10894,7 @@ generate_hash_run_scripts() {
 
     cat <<EOF > "$HS_SPLIT_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  HASH Step 2 : 버킷별 실행 스크립트 분할
 #  사용법 : bash $(basename "$HS_SPLIT_SH") <PREFIX>       (PREFIX = AS | TO)
@@ -10371,6 +10924,8 @@ while [ \$_n -lt \$BUCKETS ]; do
         echo "whenever sqlerror continue"
         echo "alter session set nls_numeric_characters = '.,';"
         echo "alter session set nls_date_format = 'YYYYMMDDHH24MISS';"
+        # [v09.04.00] TIMESTAMP WITH LOCAL TIME ZONE 은 세션 타임존으로 보이므로 양쪽을 UTC 로 고정
+        echo "alter session set time_zone = '+00:00';"
         # [v09.03.02] (E9) 컨테이너 전환은 실행 스크립트(hash_3_exec)가 PFX 에 맞게 넣는다.
         echo "spool \${LOGDIR}/\${PFX}_HASH_\${_n}.lst"
         grep "^\${_n}#" "\$SRC" | sed "s/^\${_n}#//"
@@ -10379,16 +10934,17 @@ while [ \$_n -lt \$BUCKETS ]; do
         echo "spool off"
         echo "exit"
     } > "\$_f"
-    _cnt=\$(grep -c "^insert into" "\$_f")
+    _cnt=\$(grep -c "^update " "\$_f")
     printf "  bucket %2s : %5s tables -> %s\n" "\$_n" "\$_cnt" "\$_f"
     _n=\$((_n + 1))
 done
-echo ">> 분할 완료. 총 대상: \$(grep -c '#' "\$SRC") 건"
+echo ">> 분할 완료. 총 대상: \$(grep -c '^[0-9]*#update ' "\$SRC") 건"
 EOF
     chmod 700 "$HS_SPLIT_SH"
 
     cat <<EOF > "$HS_EXEC_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  HASH Step 3 : 버킷 병렬 실행
 #  사용법 : bash $(basename "$HS_EXEC_SH") <PREFIX>        (PREFIX = AS | TO)
@@ -10498,6 +11054,8 @@ SELECT NVL(a.owner, t.owner)             AS OWNER,
        CASE
          WHEN a.owner IS NULL                       THEN 'ONLY_IN_TOBE'
          WHEN t.owner IS NULL                       THEN 'MISSING_IN_TOBE'
+         -- [FIX v09.04.00] (B17) 해시 수집문이 실패한 테이블 (자리 행만 남음)
+         WHEN a.row_cnt IS NULL OR t.row_cnt IS NULL THEN 'HASH_ERROR'
          WHEN NVL(a.col_cnt,-1) <> NVL(t.col_cnt,-2) THEN 'COLUMN_MISMATCH'
          WHEN NVL(a.row_cnt,-1) <> NVL(t.row_cnt,-2) THEN 'ROWCOUNT_MISMATCH'
          WHEN NVL(a.hash_sum,-1) = NVL(t.hash_sum,-2)
@@ -10518,7 +11076,7 @@ PROMPT ========================================================================
 SELECT owner, table_name, asis_rows, tobe_rows, asis_cols, tobe_cols, status
   FROM MIG_HASH_DIFF
  WHERE status <> 'MATCH'
- ORDER BY DECODE(status,'MISSING_IN_TOBE',1,'COLUMN_MISMATCH',2,
+ ORDER BY DECODE(status,'HASH_ERROR',0,'MISSING_IN_TOBE',1,'COLUMN_MISMATCH',2,
                         'ROWCOUNT_MISMATCH',3,'DATA_MISMATCH',4,5), owner, table_name;
 
 PROMPT
@@ -10565,6 +11123,7 @@ EOF
 
     cat <<EOF > "$HS_CMP_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -10602,7 +11161,7 @@ run_hash_mode() {
     echo "  * OS Type: $OS_TYPE / CPU: $CPU_CORES"
     echo "----------------------------------------------------------------------"
 
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Oracle 접속 계정 [기본값: / as sysdba]: "
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Oracle connection account [Default: / as sysdba]: "
     else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
@@ -10612,8 +11171,8 @@ run_hash_mode() {
     calculate_parallel_degree
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Job ID [Default: HASH_${DATE_STR}]: "
-    else printf "  작업 ID를 입력하세요 [기본값: HASH_${DATE_STR}]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Job ID [Default: HASH_%s]: " "${DATE_STR}"
+    else printf "  작업 ID를 입력하세요 [기본값: HASH_%s]: " "${DATE_STR}"; fi
     _read user_id
     if [ -z "$user_id" ]; then UNIQUE_ID="HASH_${DATE_STR}"; else UNIQUE_ID=$(echo "$user_id" | tr ' ' '_'); fi
 
@@ -10642,10 +11201,10 @@ run_hash_mode() {
     if [ "$LANG_PREF" = "EN" ]; then printf "  DB Link name to pull ASIS hashes (empty to skip): "
     else printf "  ASIS 해시를 가져올 DB Link 이름 (미사용 시 엔터): "; fi
     _read DEEP_LINK_NAME
-    [ -n "$DEEP_LINK_NAME" ] && DEEP_LINK_NAME=$(echo "$DEEP_LINK_NAME" | tr 'a-z' 'A-Z')
+    [ -n "$DEEP_LINK_NAME" ] && DEEP_LINK_NAME=$(echo "$DEEP_LINK_NAME" | tr '[:lower:]' '[:upper:]')
 
     echo "----------------------------------------------------------------------"
-    if [ "$LANG_PREF" = "EN" ]; then printf "  추가로 제외할 계정 (쉼표 구분, 없으면 엔터): "
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Additional accounts to exclude (comma-separated, Enter = none): "
     else printf "  추가로 제외할 계정 (쉼표 구분, 없으면 엔터): "; fi
     _read DEEP_EXTRA_EXCLUDE
     build_exclude_owner_list
@@ -10672,7 +11231,7 @@ run_hash_mode() {
     generate_hash_compare_scripts || return 1
 
     echo "======================================================================"
-    if [ "$LANG_PREF" = "EN" ]; then echo "  >> HASH VERIFY 스크립트 생성 완료"
+    if [ "$LANG_PREF" = "EN" ]; then echo "  >> HASH VERIFY scripts generated"
     else echo "  >> 해시 대조 스크립트 생성 완료!"; fi
     echo "======================================================================"
     echo "  [실행 순서]"
@@ -10733,8 +11292,8 @@ run_rowcount_mode() {
     calculate_parallel_degree
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Job ID [Default: RCNT_${DATE_STR}]: "
-    else printf "  작업 ID를 입력하세요 [기본값: RCNT_${DATE_STR}]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Job ID [Default: RCNT_%s]: " "${DATE_STR}"
+    else printf "  작업 ID를 입력하세요 [기본값: RCNT_%s]: " "${DATE_STR}"; fi
     _read user_id
     if [ -z "$user_id" ]; then UNIQUE_ID="RCNT_${DATE_STR}"; else UNIQUE_ID=$(echo "$user_id" | tr ' ' '_'); fi
 
@@ -10808,7 +11367,7 @@ run_rowcount_mode() {
     if [ "$LANG_PREF" = "EN" ]; then printf "  DB Link name to pull ASIS counts (empty to skip): "
     else printf "  ASIS 건수를 가져올 DB Link 이름 (미사용 시 엔터): "; fi
     _read DEEP_LINK_NAME
-    [ -n "$DEEP_LINK_NAME" ] && DEEP_LINK_NAME=$(echo "$DEEP_LINK_NAME" | tr 'a-z' 'A-Z')
+    [ -n "$DEEP_LINK_NAME" ] && DEEP_LINK_NAME=$(echo "$DEEP_LINK_NAME" | tr '[:lower:]' '[:upper:]')
 
     echo "----------------------------------------------------------------------"
     if [ "$LANG_PREF" = "EN" ]; then printf "  Additional owners to exclude (comma separated, empty for none): "
@@ -10874,6 +11433,13 @@ run_data_integrity_menu() {
             printf "  선택 (1-4, 9): "
         fi
         _read _di_sel
+        # [FIX v09.04.00] (B32) 무인 실행(--unattended --run 7)인데 설정 파일에 _di_sel 이
+        #   없으면 예전에는 조용히 "9(뒤로)" 로 끝나 아무것도 하지 않고 성공으로 보였다.
+        if [ -z "$_di_sel" ] && [ "$UNATTENDED" = "true" ]; then
+            echo "  [ERROR] --unattended --run 7 requires '_di_sel=<1-4>' in the config file."
+            echo "          (설정 파일에 _di_sel=<1-4> 를 지정하십시오)"
+            return 1
+        fi
         [ -z "$_di_sel" ] && _di_sel="9"
 
         case "$_di_sel" in
@@ -10882,13 +11448,13 @@ run_data_integrity_menu() {
             3) run_rowcount_mode ;;
             4) run_hash_mode ;;
             9|q|Q) return 0 ;;
-            *) echo "  올바른 번호를 입력하세요."; sleep 1 ;;
+            *) if [ "$LANG_PREF" = "EN" ]; then echo "  Please enter a valid number."; else echo "  올바른 번호를 입력하세요."; fi; sleep 1 ;;
         esac
 
         if [ "$UNATTENDED" = "true" ]; then
             return 0
         fi
-        printf "  계속하려면 엔터를 누르세요: "
+        if [ "$LANG_PREF" = "EN" ]; then printf "  Press Enter to continue: "; else printf "  계속하려면 엔터를 누르세요: "; fi
         _read _dummy
     done
 }
@@ -10948,7 +11514,30 @@ run_cleanup_mode() {
         else printf "  완전 삭제할 PDB 이름을 입력하세요 [기본값: %s]: " "$_target_drop_pdb"; fi
         _read user_drop_pdb
         [ -z "$user_drop_pdb" ] && user_drop_pdb="$_target_drop_pdb"
-        user_drop_pdb=$(echo "$user_drop_pdb" | tr 'a-z' 'A-Z' | awk '{$1=$1;print}')
+        user_drop_pdb=$(echo "$user_drop_pdb" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
+
+        # [v09.04.00] (개선14) PDB 삭제 안전장치
+        #   - 이름 형식 검증, PDB$SEED / CDB$ROOT 차단
+        #   - 삭제할 PDB 이름을 한 번 더 입력받아 일치할 때만 생성 (무인 실행이면
+        #     설정 파일의 confirm_drop_pdb 값이 같아야 한다)
+        case "$user_drop_pdb" in
+            'PDB$SEED'|'CDB$ROOT'|"")
+                echo "  [오류] '${user_drop_pdb}' 는 삭제할 수 없는 컨테이너입니다."
+                return 1 ;;
+        esac
+        if ! echo "$user_drop_pdb" | grep -qE '^[A-Z][A-Z0-9_$#]*$'; then
+            echo "  [오류] PDB 이름 형식이 올바르지 않습니다: ${user_drop_pdb}"
+            return 1
+        fi
+        if [ "$LANG_PREF" = "EN" ]; then printf "  !! Re-type the PDB name to confirm DROP (%s): " "$user_drop_pdb"
+        else printf "  !! 삭제를 확인하기 위해 PDB 이름을 다시 입력하십시오 (%s): " "$user_drop_pdb"; fi
+        _read confirm_drop_pdb
+        confirm_drop_pdb=$(echo "$confirm_drop_pdb" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
+        if [ "$confirm_drop_pdb" != "$user_drop_pdb" ]; then
+            if [ "$LANG_PREF" = "EN" ]; then echo "  >> Name mismatch. PDB drop script was NOT generated."
+            else echo "  >> 이름이 일치하지 않아 PDB 삭제 스크립트를 만들지 않았습니다."; fi
+            return 1
+        fi
 
         # [FIX v08.04] RAC 에서는 모든 인스턴스에서 닫혀야 DROP 이 된다 (ORA-65025).
         _pdb_close_scope=""
@@ -10962,7 +11551,7 @@ run_cleanup_mode() {
 --  Oracle Multitenant PDB Drop & Reset Script
 --  Target PDB: ${user_drop_pdb} (${DATE_STR})
 -- ==============================================================================
-SET ECHO ON LOGONLY SERVEROUTPUT ON LINES 250
+SET ECHO ON SERVEROUTPUT ON LINES 250
 SPOOL cleanup_pdb_${UNIQUE_ID}.log
 
 -- ==============================================================================
@@ -11003,10 +11592,29 @@ EOF
         if [ "$LANG_PREF" = "EN" ]; then printf "  Enter target schemas to clean up (comma-separated, e.g. KMSUNG,SCOTT): "
         else printf "  초기화/원상복구할 Target 스키마명을 입력하세요 (쉼표 구분, 예: KMSUNG,SCOTT): "; fi
         _read clean_schemas
-        clean_schemas=$(normalize_list "$clean_schemas")
+        clean_schemas=$(normalize_list "$clean_schemas" | tr '[:lower:]' '[:upper:]')
         if [ -z "$clean_schemas" ]; then
             if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] Schema name is required."; else echo "  [오류] 스키마명 입력이 필요합니다."; fi
             sleep 1
+            return 1
+        fi
+        # [v09.04.00] (개선14) 스키마 정리 안전장치
+        #   - 이름은 SQL 문자열에 그대로 들어가므로 식별자 형태만 허용
+        #   - SYS/SYSTEM 등 Oracle 내부 계정은 거부 (생성 SQL 에서도 한 번 더 걸러낸다)
+        build_exclude_owner_list
+        _cl_bad=""
+        IFS_BACKUP=$IFS; IFS=","
+        for _cl_u in $clean_schemas; do
+            if ! echo "$_cl_u" | grep -qE '^[A-Z][A-Z0-9_$#]*$'; then
+                _cl_bad="${_cl_bad} ${_cl_u}(형식)"
+            elif echo ",${DEEP_EXCL_OWNERS}," | grep -q ",'${_cl_u}',"; then
+                _cl_bad="${_cl_bad} ${_cl_u}(내부계정)"
+            fi
+        done
+        IFS=$IFS_BACKUP
+        if [ -n "$_cl_bad" ]; then
+            if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] Refusing to clean up:${_cl_bad}"
+            else echo "  [오류] 정리할 수 없는 스키마:${_cl_bad}"; fi
             return 1
         fi
 
@@ -11015,7 +11623,7 @@ EOF
 --  Oracle Target Schema Cleanup & Rollback Script
 --  Generated for Schemas: ${clean_schemas} (${DATE_STR})
 -- ==============================================================================
-SET ECHO ON LOGONLY SERVEROUTPUT ON LINES 250
+SET ECHO ON SERVEROUTPUT ON LINES 250
 $PDB_SWITCH_SQL
 SPOOL cleanup_target_${UNIQUE_ID}.log
 
@@ -11058,6 +11666,7 @@ BEGIN
       SELECT TRIM(regexp_substr(UPPER('${clean_schemas}'), '[^,]+', 1, level))
       FROM dual CONNECT BY level <= NVL(length(regexp_replace('${clean_schemas}', '[^,]+')), 0) + 1
     ) AND username IS NOT NULL
+      AND $(ora_internal_excl "username")
   ) LOOP
     BEGIN
       v_sql := 'DROP USER "' || r.username || '" CASCADE';
@@ -11160,6 +11769,7 @@ BEGIN
       SELECT TRIM(regexp_substr(UPPER('${clean_schemas}'), '[^,]+', 1, level))
       FROM dual CONNECT BY level <= NVL(length(regexp_replace('${clean_schemas}', '[^,]+')), 0) + 1
     ) AND owner IS NOT NULL
+      AND $(ora_internal_excl "owner")
   ) LOOP
     BEGIN
       EXECUTE IMMEDIATE 'TRUNCATE TABLE "' || t.owner || '"."' || t.table_name || '"';
@@ -11218,6 +11828,7 @@ EOF
 
     cat <<EOF > "$CLEAN_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
@@ -11469,6 +12080,7 @@ EOF
     echo "  * 생성 중: $RESUME_SH ($_dp_desc)"
     cat <<EOF > "$RESUME_SH"
 #!/bin/bash
+cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  [NEW v07] Data Pump Job Control Script
 #  Job      : ${SEL_JOB_OWNER}.${SEL_JOB_NAME}
@@ -11527,6 +12139,12 @@ while true; do
     if [ "$UNATTENDED" = "true" ] && [ -n "$AUTO_MENU" ]; then
         if [ "$_menu_iteration" -gt 1 ]; then
             save_config_if_requested
+            # [v09.04.00] (개선4) 메뉴 함수의 실패를 종료코드로 전달한다. 예전에는 항상 0 이라
+            #   cron/CI 에서 실패한 무인 실행이 성공으로 보였다.
+            if [ "${_menu_rc:-0}" -ne 0 ]; then
+                echo "  >> [무인 모드] 지정 작업(메뉴 ${AUTO_MENU})이 실패했습니다 (rc=${_menu_rc})."
+                exit "$_menu_rc"
+            fi
             echo "  >> [무인 모드] 지정 작업(메뉴 ${AUTO_MENU})을 완료하여 종료합니다."
             exit 0
         fi
@@ -11598,4 +12216,5 @@ while true; do
             sleep 1
             ;;
     esac
+    _menu_rc=$?
 done
