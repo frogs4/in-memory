@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.04.01 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.04.02 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -171,6 +171,21 @@
 #            - 마스터 러너 소요 시간을 bash 내장 SECONDS 로 (구형 UNIX date +%s 미지원)
 #            - 자동 산정 PARALLEL 상한 16 (MIG_PARALLEL_CAP), Standard Edition 은 1
 #            - DB Link 복사 등 수동 입력 IN 목록의 작은따옴표 이중화
+#        - [FIX v09.04.02] 전체 재점검 결과 Error / Bug 우선 수정
+#            (E1) 덤프 세트마다 impdp 를 따로 생성 (개별/GROUP 세트를 impdp 하나에 넣어 실패하던 문제)
+#                 Source 가 이관 매니페스트(<UID>_manifest.txt)를 덤프 옆에 남기고 전송한다
+#            (E2) 이미 있는 PDB 선택 시 PDB 생성 DDL 기본값 N, 같은 이름이면 생성 안 함,
+#                 생성 SQL 은 존재/OPEN 상태를 보고 건너뜀, 새 PDB 면 Data Pump 접속도 새 서비스로
+#            (E3) 통계 Import 전에 DBMS_STATS.UPGRADE_STAT_TABLE (하위 버전 Source)
+#            (E4) Target 사전 DDL 에서 프로파일 / 업무 롤(+롤의 시스템 권한)을 계정보다 먼저 생성
+#            (E5) Flashback SCN 을 실행 시점에 캡처 (expdp_00_capture_scn), 모든 expdp 가 같은 SCN
+#            (E6) REMAP_TABLE 새 이름 = 테이블명만. 통계 Import/Lock/Unlock 의 소유자 오류 수정
+#            (E7) ENCRYPTION_PWD_PROMPT 기본 N, 선택 시 터미널 없는 실행은 시작 전에 차단
+#            (B3) Target 대상 목록을 매니페스트에서 읽음 (테이블 없는 스키마 누락 / TABLESPACES 미검출)
+#            (B5) HASH / ROW COUNT / DEEP DIFF 대조 래퍼가 FAIL 판정이면 exit 1, 메뉴 7 종료코드 전달
+#            (B7) 마스터 러너: 도중 실패한 적재 스텝은 확인 없이 재실행하지 않음 (--force-rerun)
+#            (B8) 디스크 여유 공간을 df -Pk 로 (AIX/HP-UX/Solaris 512바이트 단위 2배 과대 계산)
+#            FULL 모드 expdp 에 PARALLEL 적용
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -186,7 +201,7 @@
 # ==============================================================================
 
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.04.01"
+SCRIPT_VERSION="09.04.02"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -259,6 +274,7 @@ DB_CPU_COUNT=1
 DB_SGA_GB="Unknown"
 DB_PGA_GB="Unknown"
 DB_CHARSET="Unknown"
+FLASHBACK_RUNTIME="N"      # [v09.04.02] (E5) Y = 실행 시점 SCN 캡처 사용
 DB_EDITION=""              # [v09.04.01] EE | SE (Data Pump PARALLEL 은 EE 전용)
 # [v09.04.01] 자동 산정 PARALLEL 상한 (직접 입력은 상한 무시). 환경변수 MIG_PARALLEL_CAP 로 변경
 PARALLEL_CAP="${MIG_PARALLEL_CAP:-16}"
@@ -1233,6 +1249,22 @@ detect_os_and_hw() {
     esac
 }
 
+# ------------------------------------------------------------------------------
+# [FIX v09.04.02] (B8) 여유 공간(KB)
+#   POSIX 의 df -P 는 기본 단위가 512 바이트 블록이다. GNU(Linux) 만 1K 라서, AIX / HP-UX /
+#   Solaris(xpg4) 에서는 여유 공간이 2배로 계산돼 디스크 부족을 놓쳤다.
+#   -k 로 1K 단위를 고정하고, -k 를 못 쓰면 헤더(512-blocks)를 보고 환산한다.
+# ------------------------------------------------------------------------------
+df_avail_kb() {
+    _dk=$(df -Pk "$1" 2>/dev/null | tail -n 1 | awk '{print $4}')
+    if [ -z "$_dk" ]; then
+        _dk_out=$(df -P "$1" 2>/dev/null)
+        _dk=$(echo "$_dk_out" | tail -n 1 | awk '{print $4}')
+        echo "$_dk_out" | head -n 1 | grep -q '512' && _dk=$(( $(to_num "$_dk") / 2 ))
+    fi
+    to_num "$_dk"
+}
+
 # 디스크 여유 공간 체크
 check_disk_space() {
     target_path="$1"
@@ -1261,7 +1293,7 @@ check_disk_space() {
         fi
     fi
 
-    free_kb=$(df -P "$target_path" | tail -n 1 | awk '{print $4}')
+    free_kb=$(df_avail_kb "$target_path")
     free_gb=$((free_kb / 1024 / 1024))
     if [ "$LANG_PREF" = "EN" ]; then echo "  Free Disk Space: ${free_gb} GB"
     else echo "  디스크 여유 공간: ${free_gb} GB"; fi
@@ -1330,6 +1362,8 @@ fetch_db_info() {
     SELECTED_PDB=""
     PDB_CONNECT_STR=""
     PDB_SWITCH_SQL=""
+    # [FIX v09.04.02] (E2) 목록에서 고른 PDB(이미 존재) 인지, N 으로 새로 지정한 PDB 인지
+    PDB_IS_NEW="N"
 
     if [ "$MOCK_MODE" = "true" ]; then
         DB_VERSION="19.3.0.0.0 (Mocked Target CDB)"
@@ -1355,6 +1389,7 @@ fetch_db_info() {
             SELECTED_PDB="SALESPDB"
         elif [ "$mock_pdb_sel" = "N" ] || [ "$mock_pdb_sel" = "n" ]; then
             SELECTED_PDB="APP_PDB"
+            PDB_IS_NEW="Y"
         else
             SELECTED_PDB="ORCLPDB1"
         fi
@@ -1567,6 +1602,7 @@ SQL_EOF
                     _read new_pdb_input
                     [ -z "$new_pdb_input" ] && new_pdb_input="APP_PDB"
                     SELECTED_PDB=$(echo "$new_pdb_input" | tr '[:lower:]' '[:upper:]')
+                    PDB_IS_NEW="Y"
                     break
                 elif echo "$pdb_choice" | grep -qE '^[0-9]+$'; then
                     matched_pdb=$(grep "^${pdb_choice}:" "$pdb_idx" 2>/dev/null | cut -d':' -f2)
@@ -1949,6 +1985,7 @@ reset_generation_state() {
     COMPRESSION_ALGO_PARAM=""
     VERSION_PARAM=""
     PREFLIGHT_RESULT="PASS"
+    FLASHBACK_RUNTIME="N"
     return 0
 }
 
@@ -1981,10 +2018,20 @@ generate_target_pdb_ddl() {
     if [ "$LANG_PREF" = "EN" ]; then echo "  [Oracle Multitenant: Target PDB Provisioning Generator]"
     else echo "  [Oracle Multitenant: Target PDB 신규 생성 DDL 모듈]"; fi
     
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Generate Target PDB Creation DDL (00_create_target_pdb_%s.sql)? (Y/n) [Default: Y]: " "${UNIQUE_ID}"
-    else printf "  Target DB에 신규 PDB 생성 DDL(00_create_target_pdb_%s.sql)을 생성하시겠습니까? (Y/n) [기본값: Y]: " "${UNIQUE_ID}"; fi
+    # [FIX v09.04.02] (E2) 이미 있는 PDB 를 골랐으면 기본값을 N 으로 한다.
+    #   예전에는 항상 기본 Y + 기본 이름 = 고른 PDB 라서 CREATE PLUGGABLE DATABASE <기존 PDB>
+    #   가 ORA-65012 로 실패했고, 파이프라인이 두 번째 스텝에서 멈췄다.
+    _pdb_def="Y"
+    if [ "$PDB_IS_NEW" != "Y" ] && [ -n "$SELECTED_PDB" ] && [ "$SELECTED_PDB" != "CDB\$ROOT" ]; then
+        _pdb_def="N"
+        if [ "$LANG_PREF" = "EN" ]; then echo "  >> Selected PDB ${SELECTED_PDB} already exists - PDB creation is not needed (default: N)."
+        else echo "  >> 선택한 PDB(${SELECTED_PDB})는 이미 존재합니다 - 생성이 필요 없으면 엔터 (기본값: N)"; fi
+    fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Generate Target PDB Creation DDL (00_create_target_pdb_%s.sql)? [Default: %s]: " "${UNIQUE_ID}" "$_pdb_def"
+    else printf "  Target DB에 신규 PDB 생성 DDL(00_create_target_pdb_%s.sql)을 생성하시겠습니까? [기본값: %s]: " "${UNIQUE_ID}" "$_pdb_def"; fi
     _read gen_pdb_opt
-    if [ -z "$gen_pdb_opt" ] || [ "$gen_pdb_opt" = "y" ] || [ "$gen_pdb_opt" = "Y" ]; then
+    [ -z "$gen_pdb_opt" ] && gen_pdb_opt="$_pdb_def"
+    if [ "$gen_pdb_opt" = "y" ] || [ "$gen_pdb_opt" = "Y" ]; then
         _default_new_pdb="APP_PDB"
         [ -n "$SELECTED_PDB" ] && [ "$SELECTED_PDB" != "CDB\$ROOT" ] && _default_new_pdb="$SELECTED_PDB"
 
@@ -1993,6 +2040,15 @@ generate_target_pdb_ddl() {
         _read user_pdb_name
         [ -z "$user_pdb_name" ] && user_pdb_name="$_default_new_pdb"
         user_pdb_name=$(echo "$user_pdb_name" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
+        if ! echo "$user_pdb_name" | grep -qE '^[A-Z][A-Z0-9_$#]*$'; then
+            echo "  [오류] PDB 이름 형식이 올바르지 않습니다: ${user_pdb_name}"
+            return 1
+        fi
+        if [ "$PDB_IS_NEW" != "Y" ] && [ "$user_pdb_name" = "$SELECTED_PDB" ]; then
+            if [ "$LANG_PREF" = "EN" ]; then echo "  [SKIP] ${user_pdb_name} already exists. PDB creation DDL is not generated."
+            else echo "  [건너뜀] ${user_pdb_name} 는 이미 존재하는 PDB 입니다. 생성 DDL 을 만들지 않습니다."; fi
+            return 0
+        fi
 
         if [ "$LANG_PREF" = "EN" ]; then printf "  Enter PDB Admin Username [Default: pdbadmin]: "
         else printf "  PDB 관리자(Admin) 계정명을 입력하세요 [기본값: pdbadmin]: "; fi
@@ -2056,11 +2112,22 @@ PROMPT ========================================================================
 EOF
 
         if [ -z "$is_omf_opt" ] || [ "$is_omf_opt" = "y" ] || [ "$is_omf_opt" = "Y" ]; then
+            # [FIX v09.04.02] (E2) 재실행(--resume 등)에서 이미 만들어진 PDB 는 건너뛴다.
+            _pdb_pwd_sql=$(printf '%s' "$pdb_admin_pwd" | sed "s/'/''/g")
             cat <<EOF >> "$PDB_SQL"
-CREATE PLUGGABLE DATABASE ${user_pdb_name}
-  ADMIN USER ${pdb_admin_user} IDENTIFIED BY "${pdb_admin_pwd}"
-  ROLES = (DBA)
-  DEFAULT TABLESPACE USERS;
+DECLARE
+  n NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO n FROM v\$pdbs WHERE name = '${user_pdb_name}';
+  IF n > 0 THEN
+    DBMS_OUTPUT.PUT_LINE('PDB ${user_pdb_name} already exists - creation skipped');
+  ELSE
+    EXECUTE IMMEDIATE 'CREATE PLUGGABLE DATABASE ${user_pdb_name}'
+                   || ' ADMIN USER ${pdb_admin_user} IDENTIFIED BY "${_pdb_pwd_sql}"'
+                   || ' ROLES = (DBA) DEFAULT TABLESPACE USERS';
+  END IF;
+END;
+/
 EOF
         else
             if [ "$LANG_PREF" = "EN" ]; then printf "  Enter PDB Target Datafile Directory: "
@@ -2082,7 +2149,14 @@ EOF
 DECLARE
   v_seed_dir VARCHAR2(1000);
   v_ddl      VARCHAR2(4000);
+  n          NUMBER;
 BEGIN
+  -- [FIX v09.04.02] (E2) 이미 있으면 건너뛴다 (재실행 대비)
+  SELECT COUNT(*) INTO n FROM v\$pdbs WHERE name = '${user_pdb_name}';
+  IF n > 0 THEN
+    DBMS_OUTPUT.PUT_LINE('PDB ${user_pdb_name} already exists - creation skipped');
+    RETURN;
+  END IF;
   SELECT SUBSTR(name, 1, INSTR(name, '/', -1))
     INTO v_seed_dir
     FROM v\$datafile
@@ -2105,7 +2179,13 @@ EOF
 PROMPT ========================================================================
 PROMPT 2. Opening PDB and Saving State (Auto-open on DB restart)
 PROMPT ========================================================================
-ALTER PLUGGABLE DATABASE ${user_pdb_name} OPEN READ WRITE;
+-- [FIX v09.04.02] (E2) 이미 열려 있으면(ORA-65019) 정상으로 본다 (재실행 대비)
+BEGIN
+  EXECUTE IMMEDIATE 'ALTER PLUGGABLE DATABASE ${user_pdb_name} OPEN READ WRITE';
+EXCEPTION WHEN OTHERS THEN
+  IF SQLCODE <> -65019 THEN RAISE; END IF;
+END;
+/
 ALTER PLUGGABLE DATABASE ${user_pdb_name} SAVE STATE;
 
 PROMPT ========================================================================
@@ -2160,7 +2240,25 @@ EOF
         fi
 
         GENERATED_TARGET_SCRIPTS="$PDB_SH $GENERATED_TARGET_SCRIPTS"
+        # [FIX v09.04.02] (E2) 새 PDB 이름이 앞에서 고른 PDB 와 다르면 Data Pump 접속도 새 PDB 로 바꾼다.
+        #   예전에는 SQL 은 새 PDB 로 전환하면서 impdp 는 옛 PDB 서비스로 접속했다.
+        if [ "$user_pdb_name" != "$SELECTED_PDB" ]; then
+            if [ "$LANG_PREF" = "EN" ]; then printf "  Data Pump service for the new PDB %s [Default: //localhost:1521/%s]: " "$user_pdb_name" "$user_pdb_name"
+            else printf "  새 PDB(%s)의 Data Pump 접속 서비스명 [기본값: //localhost:1521/%s]: " "$user_pdb_name" "$user_pdb_name"; fi
+            _read new_pdb_tns
+            [ -z "$new_pdb_tns" ] && new_pdb_tns="//localhost:1521/${user_pdb_name}"
+            _np_base="${PDB_CONNECT_STR:-$DB_CONN}"
+            _np_conn=$(join_pdb_connect "$_np_base" "$new_pdb_tns")
+            if [ -n "$_np_conn" ]; then
+                PDB_CONNECT_STR="$_np_conn"
+                echo "  >> Data Pump 접속: $(mask_conn_value "$PDB_CONNECT_STR")"
+            else
+                echo "  [경고] OS 인증 접속은 새 PDB 서비스로 바꿀 수 없습니다. MIG_DP_PDB_CONN 으로 다시 실행하십시오."
+                PDB_CONNECT_STR=""
+            fi
+        fi
         SELECTED_PDB="$user_pdb_name"
+        PDB_IS_NEW="Y"
         PDB_SWITCH_SQL="ALTER SESSION SET CONTAINER = ${SELECTED_PDB};"
     fi
 }
@@ -2598,12 +2696,12 @@ pick_encryption_param() {
     case "$1" in *'"'*) echo "  [오류] 덤프 암호화 패스워드에 큰따옴표(\")는 쓸 수 없습니다."; return 1 ;; esac
     _pe_major=$(echo "$DB_VERSION" | cut -d'.' -f1 | tr -dc '0-9')
     if [ -n "$_pe_major" ] && [ "$_pe_major" -ge 12 ]; then
-        if [ "$LANG_PREF" = "EN" ]; then printf "  Prompt for the password at run time instead of storing it in the par file (ENCRYPTION_PWD_PROMPT=YES)? (Y/n): "
-        else printf "  par 파일에 저장하지 않고 실행 시 입력받겠습니까 (ENCRYPTION_PWD_PROMPT=YES)? 무인 파이프라인이면 n (Y/n): "; fi
+        if [ "$LANG_PREF" = "EN" ]; then printf "  Prompt for the password at run time (ENCRYPTION_PWD_PROMPT=YES, foreground only) instead of storing it in the par (mode 600)? (y/N): "
+        else printf "  par(권한 600)에 저장하지 않고 실행 시 입력받겠습니까 (ENCRYPTION_PWD_PROMPT=YES, 포그라운드 실행 전용)? (y/N): "; fi
         _read enc_prompt_opt
-        if [ -z "$enc_prompt_opt" ]; then
-            if [ "$UNATTENDED" = "true" ]; then enc_prompt_opt="n"; else enc_prompt_opt="y"; fi
-        fi
+        # [FIX v09.04.02] (E7) 기본값 N. 권장 실행 방식(nohup / 무인 파이프라인)에서는 비밀번호를
+        #   입력할 터미널이 없다. Y 를 고르면 래퍼가 터미널 없는 실행을 시작 전에 막는다.
+        [ -z "$enc_prompt_opt" ] && enc_prompt_opt="n"
         case "$enc_prompt_opt" in
             y|Y) TDE_PARAM="ENCRYPTION_PWD_PROMPT=YES"; return 0 ;;
         esac
@@ -2714,6 +2812,25 @@ CREATE BIGFILE TABLESPACE TS_DATA ${_df_tsdata} AUTOEXTEND ON NEXT 1G MAXSIZE UN
 PROMPT ========================================================================
 PROMPT 2. Creating Database Users (original password hash preserved when available)
 PROMPT ========================================================================
+BEGIN
+  EXECUTE IMMEDIATE 'CREATE PROFILE "APP_PROFILE" LIMIT FAILED_LOGIN_ATTEMPTS 10 PASSWORD_LIFE_TIME UNLIMITED';
+EXCEPTION WHEN OTHERS THEN
+  IF SQLCODE = -2379 THEN DBMS_OUTPUT.PUT_LINE('APP_PROFILE : profile already exists - skipped'); ELSE RAISE; END IF;
+END;
+/
+DECLARE
+  v_new BOOLEAN := TRUE;
+BEGIN
+  BEGIN
+    EXECUTE IMMEDIATE 'CREATE ROLE "APP_READ_ROLE"';
+  EXCEPTION WHEN OTHERS THEN IF SQLCODE = -1921 THEN v_new := FALSE; ELSE RAISE; END IF;
+  END;
+  IF v_new THEN
+    EXECUTE IMMEDIATE 'GRANT CREATE SESSION TO "APP_READ_ROLE"';
+    DBMS_OUTPUT.PUT_LINE('APP_READ_ROLE : role created');
+  END IF;
+END;
+/
 CREATE USER "KMSUNG" IDENTIFIED BY VALUES 'S:MOCKHASH0000000000000000000000000000000000000000000000000000;T:MOCKHASH' DEFAULT TABLESPACE "USERS" TEMPORARY TABLESPACE "TEMP";
 GRANT CONNECT, RESOURCE, CREATE SESSION, UNLIMITED TABLESPACE TO "KMSUNG";
 DECLARE
@@ -2830,10 +2947,70 @@ SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
 DECLARE
   v_meta BOOLEAN := ${_env_use_meta};
   v_ddl  VARCHAR2(32767);
+  v_lim  VARCHAR2(4000);
+  v_vf   VARCHAR2(128);
 BEGIN
   IF v_meta THEN
     DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE);
   END IF;
+  -- [FIX v09.04.02] (E4) 프로파일 / 롤을 계정보다 먼저 만든다.
+  --   GET_DDL('USER') 는 기본이 아닌 프로파일을 PROFILE 절로 그대로 쓰는데, 그 프로파일을
+  --   만드는 곳이 없어 CREATE USER 가 ORA-02380 으로 실패했다. 업무 롤도 SCHEMA 모드 impdp 가
+  --   만들지 않으므로 99 단계 GRANT 가 ORA-01919 로 실패했다.
+  --   롤은 "새로 만든 경우에만" 시스템 권한을 준다 (DBA / CONNECT 같은 기본 롤은 건드리지 않음).
+  --   비밀번호 검증 함수는 Target 에 없을 수 있어 실패해도 경고만 남긴다.
+  FOR p IN (SELECT DISTINCT profile FROM dba_users${DBLINK_SUFFIX}
+             $_usr_where_clause
+               AND username NOT LIKE 'C##%' AND profile <> 'DEFAULT' AND profile NOT LIKE 'C##%'
+             ORDER BY profile) LOOP
+    v_lim := NULL; v_vf := NULL;
+    FOR l IN (SELECT resource_name, "LIMIT" AS lim FROM dba_profiles${DBLINK_SUFFIX}
+               WHERE profile = p.profile ORDER BY resource_name) LOOP
+      IF l.resource_name = 'PASSWORD_VERIFY_FUNCTION' THEN
+        IF l.lim NOT IN ('NULL', 'DEFAULT', 'UNLIMITED') THEN v_vf := l.lim; END IF;
+      ELSE
+        v_lim := v_lim || ' ' || l.resource_name || ' ' || l.lim;
+      END IF;
+    END LOOP;
+    DBMS_OUTPUT.PUT_LINE('BEGIN');
+    DBMS_OUTPUT.PUT_LINE('  EXECUTE IMMEDIATE ''CREATE PROFILE "' || p.profile || '" LIMIT' || v_lim || ''';');
+    DBMS_OUTPUT.PUT_LINE('EXCEPTION WHEN OTHERS THEN');
+    DBMS_OUTPUT.PUT_LINE('  IF SQLCODE = -2379 THEN DBMS_OUTPUT.PUT_LINE(''' || p.profile || ' : profile already exists - skipped''); ELSE RAISE; END IF;');
+    DBMS_OUTPUT.PUT_LINE('END;');
+    DBMS_OUTPUT.PUT_LINE('/');
+    IF v_vf IS NOT NULL THEN
+      DBMS_OUTPUT.PUT_LINE('BEGIN');
+      DBMS_OUTPUT.PUT_LINE('  EXECUTE IMMEDIATE ''ALTER PROFILE "' || p.profile || '" LIMIT PASSWORD_VERIFY_FUNCTION ' || v_vf || ''';');
+      DBMS_OUTPUT.PUT_LINE('EXCEPTION WHEN OTHERS THEN DBMS_OUTPUT.PUT_LINE(''[WARN] ' || p.profile || ' : password verify function ' || v_vf || ' not available on target - left as is'');');
+      DBMS_OUTPUT.PUT_LINE('END;');
+      DBMS_OUTPUT.PUT_LINE('/');
+    END IF;
+  END LOOP;
+
+  FOR g IN (SELECT DISTINCT granted_role FROM dba_role_privs${DBLINK_SUFFIX}
+             WHERE grantee IN (SELECT username FROM dba_users${DBLINK_SUFFIX}
+                                $_usr_where_clause AND username NOT LIKE 'C##%')
+               AND granted_role NOT LIKE 'C##%'
+             ORDER BY granted_role) LOOP
+    DBMS_OUTPUT.PUT_LINE('DECLARE');
+    DBMS_OUTPUT.PUT_LINE('  v_new BOOLEAN := TRUE;');
+    DBMS_OUTPUT.PUT_LINE('BEGIN');
+    DBMS_OUTPUT.PUT_LINE('  BEGIN');
+    DBMS_OUTPUT.PUT_LINE('    EXECUTE IMMEDIATE ''CREATE ROLE "' || g.granted_role || '"'';');
+    DBMS_OUTPUT.PUT_LINE('  EXCEPTION WHEN OTHERS THEN IF SQLCODE = -1921 THEN v_new := FALSE; ELSE RAISE; END IF;');
+    DBMS_OUTPUT.PUT_LINE('  END;');
+    DBMS_OUTPUT.PUT_LINE('  IF v_new THEN');
+    FOR sp IN (SELECT privilege, admin_option FROM dba_sys_privs${DBLINK_SUFFIX}
+                WHERE grantee = g.granted_role ORDER BY privilege) LOOP
+      DBMS_OUTPUT.PUT_LINE('    EXECUTE IMMEDIATE ''GRANT ' || sp.privilege || ' TO "' || g.granted_role || '"' ||
+                           CASE WHEN sp.admin_option = 'YES' THEN ' WITH ADMIN OPTION' END || ''';');
+    END LOOP;
+    DBMS_OUTPUT.PUT_LINE('    DBMS_OUTPUT.PUT_LINE(''' || g.granted_role || ' : role created'');');
+    DBMS_OUTPUT.PUT_LINE('  END IF;');
+    DBMS_OUTPUT.PUT_LINE('END;');
+    DBMS_OUTPUT.PUT_LINE('/');
+  END LOOP;
+
   FOR r IN (SELECT username,
                    NVL(default_tablespace, 'USERS') dts,
                    NVL(temporary_tablespace, 'TEMP') tts
@@ -3352,6 +3529,7 @@ cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)�
 #    ./$(basename "$MASTER_RUNNER_SH") -y --retry 2     # 스텝별 최대 2회 재시도
 #    ./$(basename "$MASTER_RUNNER_SH") --from 3         # 3번 스텝부터 실행
 #    ./$(basename "$MASTER_RUNNER_SH") --reset          # 체크포인트 초기화
+#    ./$(basename "$MASTER_RUNNER_SH") -y --resume --force-rerun  # 도중 실패한 적재 스텝도 다시 실행
 # ==============================================================================
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
@@ -3367,6 +3545,7 @@ RESUME="false"
 MAX_RETRY=1
 FROM_STEP=1
 LIST_ONLY="false"
+FORCE_RERUN="false"
 
 while [ \$# -gt 0 ]; do
     case "\$1" in
@@ -3377,6 +3556,7 @@ while [ \$# -gt 0 ]; do
         --from)                shift; FROM_STEP="\$1" ;;
         --from=*)              FROM_STEP=\$(echo "\$1" | cut -d'=' -f2) ;;
         --list)                LIST_ONLY="true" ;;
+        --force-rerun)         FORCE_RERUN="true" ;;
         --reset)               rm -f "\$STATE_FILE"; echo ">> 체크포인트를 초기화했습니다: \$STATE_FILE"; exit 0 ;;
         -h|--help)
             grep '^#' "\$0" | sed 's/^# \\{0,1\\}//' | head -n 20
@@ -3412,6 +3592,26 @@ is_done() {
 
 mark_done() {
     grep -qxF "DONE:\$1" "\$STATE_FILE" 2>/dev/null || echo "DONE:\$1" >> "\$STATE_FILE"
+}
+
+# [FIX v09.04.02] (B7) 데이터 적재 스텝의 재실행 보호
+#   예전에는 적재 중 실패한 impdp_2_data(APPEND) 를 --resume 이나 재실행이 처음부터 다시
+#   돌려, 이미 들어간 행이 한 번 더 들어갔다. 시작 표시(STARTED)를 남기고, 시작은 됐지만
+#   끝나지 않은 적재 스텝은 확인 없이 다시 돌리지 않는다.
+#   다시 돌려도 안전한 경우(TABLE_EXISTS_ACTION=TRUNCATE / REPLACE)는 그대로 진행한다.
+is_started() {
+    grep -qxF "STARTED:\$1" "\$STATE_FILE" 2>/dev/null
+}
+mark_started() {
+    grep -qxF "STARTED:\$1" "\$STATE_FILE" 2>/dev/null || echo "STARTED:\$1" >> "\$STATE_FILE"
+}
+is_load_step() {
+    case "\$1" in impdp_2_data_*|impdp_1_execute_all_*|dblink_1_copy_*) return 0 ;; esac
+    return 1
+}
+rerun_is_safe() {
+    _par="\${1%.sh}.par"
+    [ -f "\$_par" ] && grep -qE '^TABLE_EXISTS_ACTION=(TRUNCATE|REPLACE)' "\$_par"
 }
 
 total_steps=0
@@ -3475,6 +3675,24 @@ for s_file in \$STEP_LIST; do
     log_msg ">> [Step \$step_num/\$total_steps] Running: \$s_file"
     log_msg "---------------------------------------------------------------------"
 
+    if is_load_step "\$s_file" && is_started "\$s_file" && ! is_done "\$s_file" \
+       && ! rerun_is_safe "\$s_file" && [ "\$FORCE_RERUN" != "true" ]; then
+        log_msg ">> [중단] \$s_file 는 이전 실행에서 적재 도중 끝났습니다 (STARTED 기록 있음, DONE 없음)."
+        log_msg "          다시 돌리면 이미 들어간 행이 중복 적재될 수 있습니다 (APPEND / SKIP)."
+        log_msg "          조치: (1) 대상 테이블을 비운 뒤 --force-rerun 으로 재실행"
+        log_msg "                (2) 메뉴 9(RESUME) 로 Data Pump 작업 자체를 ATTACH / START_JOB 으로 재개"
+        if [ "\$UNATTENDED" != "true" ] && [ -t 0 ]; then
+            printf "그래도 지금 다시 실행하려면 RERUN 을 입력하십시오: "
+            read _rerun_ans
+            if [ "\$_rerun_ans" != "RERUN" ]; then
+                log_msg ">> Pipeline halted before \$s_file (재적재 보호)"
+                exit 1
+            fi
+        else
+            exit 1
+        fi
+    fi
+
     if [ "\$UNATTENDED" != "true" ] && [ -t 0 ]; then
         printf "실행하시겠습니까? / Proceed with \$s_file? (Y/n/q:quit): "
         read _step_ans
@@ -3505,6 +3723,7 @@ for s_file in \$STEP_LIST; do
         #              실제 스텝이 실패해도 항상 [PASS] 로 기록되었다.
         #              rc 파일을 사용해 실제 스텝의 종료코드를 정확히 취득한다.
         _rc_file="./.step_rc_\$\$"
+        is_load_step "\$s_file" && mark_started "\$s_file"
         # [FIX v08.02] 셔뱅(#!/bin/bash)과 일치하도록 bash 로 실행
         { bash "\$s_file" 2>&1; echo \$? > "\$_rc_file"; } | tee -a "\$MASTER_LOG"
         step_rc=\$(cat "\$_rc_file" 2>/dev/null)
@@ -3657,8 +3876,7 @@ human_bytes() {
 # 지정 경로의 여유 공간(byte)
 free_space_bytes() {
     if [ "$MOCK_MODE" = "true" ]; then echo "536870912000"; return 0; fi
-    _fs_kb=$(df -P "$1" 2>/dev/null | tail -n 1 | awk '{print $4}')
-    _fs_kb=$(to_num "$_fs_kb")
+    _fs_kb=$(df_avail_kb "$1")
     echo $((_fs_kb * 1024))
     return 0
 }
@@ -4062,6 +4280,154 @@ run_preflight_checks() {
     return 0
 }
 
+# ------------------------------------------------------------------------------
+# [FIX v09.04.02] (B5) 검증 래퍼의 판정을 종료코드로 낸다
+#   emit_verdict_check <대상.sh> <스풀로그> <설명>
+#   예전 HASH / ROW COUNT / DEEP DIFF 대조 래퍼는 판정이 FAIL 이어도 0 으로 끝나,
+#   마스터 러너와 무인 배치가 PASS 로 기록했다. 스풀 로그의 "RESULT: FAIL" 이 있거나
+#   "RESULT: PASS" 가 하나도 없으면(=판정까지 못 감) 1 로 끝낸다.
+# ------------------------------------------------------------------------------
+emit_verdict_check() {
+    cat <<VC_EOF >> "$1"
+_vc_rc=\$?
+if [ "\$_vc_rc" -ne 0 ]; then
+    echo ">> [실패] $3 - sqlplus 종료코드 \$_vc_rc"
+    exit "\$_vc_rc"
+fi
+if grep -q 'RESULT: FAIL' "$2" 2>/dev/null; then
+    echo ">> [FAIL] $3 - 불일치가 있습니다. 로그: $2"
+    grep 'RESULT: FAIL' "$2" | sed 's/^ */     /'
+    exit 1
+fi
+if ! grep -q 'RESULT: PASS' "$2" 2>/dev/null; then
+    echo ">> [실패] $3 - 판정 결과를 찾지 못했습니다 (중간 오류 가능). 로그: $2"
+    exit 1
+fi
+echo ">> [PASS] $3"
+VC_EOF
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.04.02] (E5/E7) 생성 래퍼의 Data Pump 실행 줄
+#   dp_run_lines <expdp|impdp> <par> [scn]
+#   - TDE_PARAM 이 ENCRYPTION_PWD_PROMPT=YES 이면, 터미널이 없을 때(nohup / 백그라운드 /
+#     무인 파이프라인) 비밀번호를 받을 수 없어 멈추거나 실패하므로 시작 전에 막는다. (E7)
+#   - 세 번째 인자가 scn 이고 FLASHBACK_RUNTIME=Y 이면, 실행 시점에 캡처한 SCN 파일
+#     (<UID>_flashback.scn) 을 읽어 FLASHBACK_SCN 으로 넘긴다. (E5)
+#     예전에는 스크립트를 "만들 때" 의 SCN 을 par 에 박아, 실제 실행이 늦어지면
+#     ORA-01555 / ORA-08181 로 실패했다. 모든 expdp 가 같은 SCN 을 쓰므로 메타데이터 /
+#     개별 / GROUP 덤프 사이의 시점도 일치한다.
+# ------------------------------------------------------------------------------
+dp_run_lines() {
+    _dr_bin="$1"; _dr_par="$2"; _dr_scn="$3"
+    if [ "$TDE_PARAM" = "ENCRYPTION_PWD_PROMPT=YES" ]; then
+        cat <<DRL_EOF
+if [ ! -t 0 ]; then
+    echo ">> [실패] 이 par 는 ENCRYPTION_PWD_PROMPT=YES 라 터미널에서 덤프 암호화 비밀번호를 입력해야 합니다."
+    echo ">>        nohup / 백그라운드 / 무인 실행에서는 입력할 수 없습니다. 포그라운드로 실행하십시오."
+    exit 1
+fi
+DRL_EOF
+    fi
+    if [ "$_dr_scn" = "scn" ] && [ "$FLASHBACK_RUNTIME" = "Y" ]; then
+        cat <<DRL_EOF
+_scn=\$(cat "${UNIQUE_ID}_flashback.scn" 2>/dev/null)
+if ! echo "\$_scn" | grep -qE '^[0-9]+\$'; then
+    echo ">> [실패] 일관성 기준 SCN 파일(${UNIQUE_ID}_flashback.scn)이 없습니다."
+    echo ">>        먼저 expdp_00_capture_scn_${UNIQUE_ID}.sh 를 실행하십시오 (마스터 러너의 첫 스텝)."
+    exit 1
+fi
+echo ">> FLASHBACK_SCN=\$_scn (실행 시점에 캡처한 SCN)"
+${_dr_bin} PARFILE=${_dr_par} FLASHBACK_SCN=\$_scn
+DRL_EOF
+    else
+        echo "${_dr_bin} PARFILE=${_dr_par}"
+    fi
+}
+
+# [FIX v09.04.02] (E5) 실행 시점 SCN 캡처 스텝
+generate_scn_capture_script() {
+    SCN_CAP_SH="expdp_00_capture_scn_${UNIQUE_ID}.sh"
+    if [ "$EXPORT_METHOD" = "NETWORK_LINK" ] && [ -n "$DBLINK_NAME" ]; then
+        _sc_from="v\$database@${DBLINK_NAME}"
+    else
+        _sc_from="v\$database"
+    fi
+    echo "  * 생성 중: $SCN_CAP_SH (실행 시점 Flashback SCN 캡처)"
+    cat <<SCN_EOF > "$SCN_CAP_SH"
+#!/bin/bash
+cd "\$(dirname "\$0")" || exit 1
+export ORACLE_HOME=$ORACLE_HOME
+export ORACLE_SID=$ORACLE_SID
+export PATH=\$ORACLE_HOME/bin:\$PATH
+export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+# 이 SCN 을 모든 expdp(메타데이터 / 개별 / GROUP)가 같이 쓴다. 다시 실행하면 새 SCN 으로 바뀐다.
+_out=\$(sqlplus -S /nolog <<SQL_EOF
+WHENEVER SQLERROR EXIT FAILURE
+connect $(hd_esc "$DB_CONN")
+SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 100
+$(hd_esc "$PDB_SWITCH_SQL")
+SELECT 'VAL:' || current_scn FROM $(hd_esc "$_sc_from");
+EXIT;
+SQL_EOF
+)
+_scn=\$(echo "\$_out" | sed -n 's/^[[:space:]]*VAL:\\([0-9][0-9]*\\)[[:space:]]*\$/\\1/p' | head -n 1)
+if [ -z "\$_scn" ]; then
+    echo ">> [실패] 현재 SCN 을 조회하지 못했습니다."
+    echo "\$_out" | grep -E 'ORA-|SP2-' | head -n 3
+    exit 1
+fi
+echo "\$_scn" > "${UNIQUE_ID}_flashback.scn"
+echo ">> 일관성 기준 SCN: \$_scn  (${UNIQUE_ID}_flashback.scn)"
+SCN_EOF
+    chmod 700 "$SCN_CAP_SH"
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.04.02] (E1/B3) 이관 매니페스트 기록 / 조회
+#   파일: <덤프 디렉터리>/<UNIQUE_ID>_manifest.txt  (전송 스크립트가 덤프와 함께 보낸다)
+#     MIG_TYPE=SCHEMA
+#     ITEMS=HR,SCOTT,KMSUNG
+#     SET|GROUP|HR,SCOTT          (덤프 세트 접미사 | 그 세트에 든 대상)
+#     SET|KMSUNG|KMSUNG
+# ------------------------------------------------------------------------------
+write_migration_manifest() {
+    _mf_items="$SCHEMAS_LIST$TABLES_LIST$TBS_LIST"
+    [ "$MIG_TYPE" = "FULL" ] && _mf_items="FULL"
+    _mf_body="# Oracle Migration Helper v${SCRIPT_VERSION} manifest - do not edit
+UNIQUE_ID=${UNIQUE_ID}
+MIG_TYPE=${MIG_TYPE}
+ITEMS=${_mf_items}"
+    if [ -n "$SMALL_ITEMS" ]; then
+        _mf_body="${_mf_body}
+SET|GROUP|${SMALL_ITEMS}"
+    fi
+    _mf_ifs=$IFS; IFS=","
+    for _mf_b in $BIG_ITEMS; do
+        _mf_body="${_mf_body}
+SET|$(echo "$_mf_b" | tr '.:' '__')|${_mf_b}"
+    done
+    IFS=$_mf_ifs
+    MANIFEST_FILE="${UNIQUE_ID}_manifest.txt"
+    printf '%s\n' "$_mf_body" > "./${MANIFEST_FILE}"
+    if [ -n "$DIR_PHYSICAL_PATH" ] && [ -d "$DIR_PHYSICAL_PATH" ] \
+       && (umask 022; printf '%s\n' "$_mf_body" > "${DIR_PHYSICAL_PATH}/${MANIFEST_FILE}") 2>/dev/null; then
+        echo "  * 이관 매니페스트: ${DIR_PHYSICAL_PATH}/${MANIFEST_FILE} (덤프와 함께 Target 으로 전송)"
+    else
+        echo "  * 이관 매니페스트: ./${MANIFEST_FILE}"
+        echo "    [안내] 덤프 디렉터리에 쓰지 못했습니다. 이 파일을 Target 의 덤프 디렉터리로 함께 복사하십시오."
+    fi
+    return 0
+}
+
+# manifest_path : Target 에서 매니페스트 위치 (덤프 디렉터리 우선, 없으면 현재 디렉터리)
+manifest_path() {
+    for _mp in "${DIR_PHYSICAL_PATH}/${UNIQUE_ID}_manifest.txt" "./${UNIQUE_ID}_manifest.txt"; do
+        [ -f "$_mp" ] && { echo "$_mp"; return 0; }
+    done
+    return 1
+}
+
 # 1. Source Server Mode (expdp 스크립트 생성)
 run_source_mode() {
     # [FIX v07/B2] 메인 메뉴 루프에서 재진입할 때 이전 실행의 스크립트 목록이
@@ -4323,40 +4689,20 @@ run_source_mode() {
     else printf "  Flashback SCN 옵션을 사용하여 일관성 있는 덤프를 수행하시겠습니까? (y/n) [기본값: n]: "; fi
     _read use_scn
     FLASHBACK_PARAM=""
+    FLASHBACK_RUNTIME="N"
     if [ "$use_scn" = "y" ] || [ "$use_scn" = "Y" ]; then
-        if [ "$MOCK_MODE" = "true" ]; then CURRENT_SCN="1234567890"
+        # [FIX v09.04.02] (E5) 기본은 "실행 시점" SCN 이다. 파이프라인 첫 스텝이 현재 SCN 을
+        #   파일에 남기고, 모든 expdp 가 그 값을 FLASHBACK_SCN 으로 쓴다.
+        #   특정 시점이 필요하면 SCN 을 직접 입력한다 (그 값이 par 에 고정된다).
+        if [ "$LANG_PREF" = "EN" ]; then printf "  Enter = capture SCN at run time (recommended), or type a fixed SCN: "
+        else printf "  엔터 = 실행 시점 SCN 자동 캡처(권장), 특정 시점이면 SCN 직접 입력: "; fi
+        _read custom_scn
+        if [ -n "$custom_scn" ] && echo "$custom_scn" | grep -qE '^[0-9]+$'; then
+            FLASHBACK_PARAM="FLASHBACK_SCN=$custom_scn"
+            echo "  >> 고정 SCN 적용: $custom_scn (par 에 기록)"
         else
-            scn_sql="$(tmpf get_scn.sql)"
-            echo "SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 100 TRIMSPOOL ON;" > "$scn_sql"
-            # [FIX v09.03.02] (B13) NETWORK_LINK Export 의 FLASHBACK_SCN 은 원격(Source) DB 의
-            #   SCN 이어야 한다. 예전에는 로컬 DB 의 SCN 을 넣어, 원격 기준으로 존재하지 않는
-            #   SCN 이 되거나(실패) 엉뚱한 시점이 되었다.
-            if [ "$EXPORT_METHOD" = "NETWORK_LINK" ] && [ -n "$DBLINK_NAME" ]; then
-                [ -n "$PDB_SWITCH_SQL" ] && echo "$PDB_SWITCH_SQL" >> "$scn_sql"
-                echo "SELECT current_scn FROM v\$database@${DBLINK_NAME};" >> "$scn_sql"
-                echo "  >> 원격(Source) DB 의 SCN 을 DB Link(${DBLINK_NAME}) 로 조회합니다."
-            else
-                echo "SELECT current_scn FROM v\$database;" >> "$scn_sql"
-            fi
-            echo "EXIT;" >> "$scn_sql"
-            CURRENT_SCN=$(sqlplus -S /nolog <<CONNECT_EOF | grep -v '^$' | tr -d ' ' | head -n 1
-connect $DB_CONN
-@$scn_sql
-CONNECT_EOF
-            )
-            rm -f "$scn_sql"
-        fi
-        
-        if echo "$CURRENT_SCN" | grep -qE '^[0-9]+$'; then
-            echo "  >> Current DB SCN: $CURRENT_SCN"
-            if [ "$LANG_PREF" = "EN" ]; then printf "  Press Enter to use this SCN, or type a custom SCN: "
-            else printf "  위 SCN을 사용하시려면 엔터를, 다른 SCN을 지정하시려면 값을 입력하세요: "; fi
-            _read custom_scn
-            if [ -n "$custom_scn" ] && echo "$custom_scn" | grep -qE '^[0-9]+$'; then FINAL_SCN="$custom_scn"; else FINAL_SCN="$CURRENT_SCN"; fi
-            echo "  >> Applied SCN: $FINAL_SCN"
-            FLASHBACK_PARAM="FLASHBACK_SCN=$FINAL_SCN"
-        else
-            echo "  [경고/WARNING] Failed to fetch SCN. Skipping Flashback SCN."
+            FLASHBACK_RUNTIME="Y"
+            echo "  >> 실행 시점 SCN 을 파이프라인 첫 스텝에서 캡처해 모든 expdp 에 같이 적용합니다."
         fi
     fi
 
@@ -4471,7 +4817,7 @@ SQL_EOF
 EOF
     fi
     cat <<EOF >> "$META_SH"
-expdp PARFILE=$META_PAR
+$(dp_run_lines expdp "$META_PAR" scn)
 EOF
     chmod 700 "$META_SH"; chmod 600 "$META_PAR" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
     GENERATED_META_SCRIPTS="$META_SH"
@@ -4599,7 +4945,7 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 EOF
         generate_run_prompt "$_exp_est_sh" "expdp 용량 예측 시뮬레이션 ($_exp_suffix)"
         cat <<EOF >> "$_exp_est_sh"
-expdp PARFILE=$_exp_est_par
+$(dp_run_lines expdp "$_exp_est_par")
 EOF
         chmod 700 "$_exp_est_sh"; chmod 600 "$_exp_est_par" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
 
@@ -4645,7 +4991,7 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 EOF
         generate_run_prompt "$_exp_exec_sh" "실제 데이터 expdp ($_exp_suffix)"
         cat <<EOF >> "$_exp_exec_sh"
-expdp PARFILE=$_exp_exec_par
+$(dp_run_lines expdp "$_exp_exec_par" scn)
 EOF
         chmod 700 "$_exp_exec_sh"; chmod 600 "$_exp_exec_par" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
 
@@ -4672,8 +5018,21 @@ EOF
 
     if [ -n "$SMALL_ITEMS" ]; then
         echo "  [그룹화(기준 미만) 대상 스크립트 생성]"
-        generate_expdp_scripts "$SMALL_ITEMS" "GROUP" "$PARAM_TYPE" "NO" "G"
+        # [FIX v09.04.02] (B1 관련) FULL 은 덤프 세트가 하나뿐이므로 PARALLEL 을 쓴다.
+        if [ "$MIG_TYPE" = "FULL" ]; then
+            generate_expdp_scripts "$SMALL_ITEMS" "GROUP" "$PARAM_TYPE" "YES" "G"
+        else
+            generate_expdp_scripts "$SMALL_ITEMS" "GROUP" "$PARAM_TYPE" "NO" "G"
+        fi
     fi
+
+    # [FIX v09.04.02] (E1/B3) 이관 매니페스트
+    #   Target 은 예전에 (1) 대상 목록을 expdp 로그의 ". . exported" 줄에서, (2) 덤프 세트를
+    #   파일명에서 추측했다. PARFILE 을 쓰면 SCHEMAS= / TABLESPACES= 가 로그에 찍히지 않고,
+    #   테이블이 없는 스키마는 exported 줄이 없어 대상에서 빠졌다. 또 개별(B1..) 세트와
+    #   GROUP 세트를 impdp 하나에 같이 넣어 실패했다 (impdp 한 작업 = 덤프 세트 하나).
+    #   Source 가 아는 사실(모드 / 대상 / 세트별 대상)을 덤프 옆에 파일로 남긴다.
+    write_migration_manifest
 
     if [ "$EXPORT_METHOD" = "LOCAL" ]; then
         echo "----------------------------------------------------------------------"
@@ -4774,7 +5133,7 @@ if [ "\$_rc_sql" -ne 0 ]; then
     echo ">> [실패] 통계 추출 SQL 이 실패했습니다 (sqlplus exit=\$_rc_sql). expdp 를 건너뜁니다."
 else
     echo ">> Stat Table 백업을 위해 expdp를 실행합니다..."
-    expdp PARFILE=$STATS_PAR
+$(dp_run_lines expdp "$STATS_PAR")
     _rc_exp=\$?
 fi
 
@@ -4881,7 +5240,7 @@ log "  - Retry  : \$MAX_RETRY"
 log "====================================================================="
 
 _sent=0; _failed=0
-for f in "\$SRC_DIR"/${UNIQUE_ID}*.dmp "\$SRC_DIR"/${UNIQUE_ID}*.log "\$SRC_DIR"/${UNIQUE_ID}_dumpfiles.md5; do
+for f in "\$SRC_DIR"/${UNIQUE_ID}_*.dmp "\$SRC_DIR"/${UNIQUE_ID}_*.log "\$SRC_DIR"/${UNIQUE_ID}_dumpfiles.md5 "\$SRC_DIR"/${UNIQUE_ID}_manifest.txt ./${UNIQUE_ID}_manifest.txt; do
     [ -e "\$f" ] || continue
     if send_one "\$f"; then
         log "   [ OK ] \$(basename "\$f")"
@@ -4937,7 +5296,12 @@ EOF
     if [ "$CHECKSUM_ENABLED" = "true" ] && [ -n "$GENERATED_CHECKSUM_SCRIPTS" ]; then
         CHK_CREATE_IN_FLOW=$(echo "$GENERATED_CHECKSUM_SCRIPTS" | awk '{print $1}')
     fi
-    ALL_SRC_FLOW="$GENERATED_META_SCRIPTS $GENERATED_EXEC_SCRIPTS $GENERATED_STATS_SCRIPTS $CHK_CREATE_IN_FLOW $GENERATED_XFER_SCRIPTS"
+    _scn_step=""
+    if [ "$FLASHBACK_RUNTIME" = "Y" ]; then
+        generate_scn_capture_script
+        _scn_step="$SCN_CAP_SH"
+    fi
+    ALL_SRC_FLOW="$_scn_step $GENERATED_META_SCRIPTS $GENERATED_EXEC_SCRIPTS $GENERATED_STATS_SCRIPTS $CHK_CREATE_IN_FLOW $GENERATED_XFER_SCRIPTS"
     generate_master_runner_script "Source Server Export Pipeline" "$ALL_SRC_FLOW"
 
     echo "======================================================================"
@@ -5513,6 +5877,82 @@ run_dblink_copy_mode() {
 }
 
 # ------------------------------------------------------------------------------
+# [FIX v09.04.02] (E1) 덤프 세트별 impdp
+#   Source 는 기준 크기 이상 대상을 개별 expdp 작업(<UID>_<대상>_%U.dmp)으로, 나머지를
+#   GROUP 작업(<UID>_GROUP_%U.dmp)으로 받는다. 예전 Target 은 이를 모두
+#   DUMPFILE=<UID>_GROUP_%U.dmp,<UID>_KMSUNG_%U.dmp 처럼 impdp 하나에 넣었는데,
+#   impdp 한 작업은 export 한 작업이 만든 덤프 세트 하나만 읽을 수 있어 실패했다.
+#   세트마다 그 세트에 든 대상만으로 impdp 를 따로 만든다.
+#   결과: IMPORT_SETS (줄마다 "파일접미사|JOB접미사|DUMPFILE=...|모드=대상")
+#   세트가 하나뿐이면 접미사 없이 예전과 같은 파일명을 쓴다.
+# ------------------------------------------------------------------------------
+build_import_sets() {
+    IMPORT_SETS="||${IMP_SOURCE_PARAM}|${MIG_PARAMS}"
+    [ "$IMPORT_METHOD" = "DUMP" ] || return 0
+    _is_cnt=$(echo "$PREFIXES" | sed '/^$/d' | wc -l | tr -d ' ')
+    [ "${_is_cnt:-0}" -le 1 ] && return 0
+
+    case "$MIG_TYPE" in
+        SCHEMA) _is_kw="SCHEMAS" ;; TABLE) _is_kw="TABLES" ;;
+        TABLESPACE) _is_kw="TABLESPACES" ;; *) _is_kw="" ;;
+    esac
+    _is_mf=$(manifest_path)
+    _is_all_sfx=""
+    for _is_p in $PREFIXES; do
+        _is_s=${_is_p#"${UNIQUE_ID}_"}; _is_s=${_is_s%_%U.dmp}
+        _is_all_sfx="${_is_all_sfx} ${_is_s}"
+    done
+
+    IMPORT_SETS=""
+    _is_n=0
+    echo "  >> 덤프 세트 ${_is_cnt}개를 확인했습니다. impdp 를 세트별로 나눠 만듭니다 (한 작업 = 한 세트)."
+    for _is_p in $PREFIXES; do
+        _is_s=${_is_p#"${UNIQUE_ID}_"}; _is_s=${_is_s%_%U.dmp}
+        if [ -z "$_is_kw" ]; then
+            _is_mig="$MIG_PARAMS"
+        else
+            # 이 세트에 든 대상: 매니페스트 우선, 없으면 파일 접미사로 추정
+            _is_items=""
+            [ -n "$_is_mf" ] && _is_items=$(grep "^SET|${_is_s}|" "$_is_mf" | head -n 1 | cut -d'|' -f3)
+            if [ -z "$_is_items" ] && [ -z "$_is_mf" ]; then
+                _is_ifs=$IFS; IFS=","
+                for _is_i in $FINAL_LIST; do
+                    _is_isfx=$(echo "$_is_i" | tr '.:' '__')
+                    if [ "$_is_s" = "GROUP" ]; then
+                        case " $_is_all_sfx " in *" $_is_isfx "*) continue ;; esac
+                    elif [ "$_is_isfx" != "$_is_s" ]; then
+                        continue
+                    fi
+                    _is_items="${_is_items:+${_is_items},}${_is_i}"
+                done
+                IFS=$_is_ifs
+            fi
+            # 사용자가 고른 최종 대상(FINAL_LIST)과의 교집합만 남긴다
+            _is_sel=""
+            _is_ifs=$IFS; IFS=","
+            for _is_i in $_is_items; do
+                case ",$FINAL_LIST," in *",${_is_i},"*) _is_sel="${_is_sel:+${_is_sel},}${_is_i}" ;; esac
+            done
+            IFS=$_is_ifs
+            if [ -z "$_is_sel" ]; then
+                echo "     - ${_is_p} : 선택된 대상 없음 - 건너뜀"
+                continue
+            fi
+            _is_mig="${_is_kw}=${_is_sel}"
+        fi
+        _is_n=$((_is_n + 1))
+        echo "     - ${_is_p} : ${_is_mig}"
+        IMPORT_SETS="${IMPORT_SETS}_${_is_s}|_${_is_n}|DUMPFILE=${_is_p}|${_is_mig}
+"
+    done
+    if [ -z "$IMPORT_SETS" ]; then
+        echo "  [경고] 세트별 대상을 정하지 못해 하나의 impdp 로 만듭니다 (세트가 여러 개면 실패할 수 있습니다)."
+        IMPORT_SETS="||${IMP_SOURCE_PARAM}|${MIG_PARAMS}"
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------------------------
 # [FIX v09.03.02] (E3) Target 파이프라인 스텝 순서
 #   덤프 검증 -> PDB 생성 -> 계정/TBS -> DDL 추출 -> 구조 -> FK/트리거 끄기 -> 데이터
 #   -> FK/트리거 켜기 -> 나머지 객체 -> 통계 -> 통계 잠금 -> 권한/시노님 -> 사후 검증
@@ -5735,7 +6175,25 @@ run_target_mode() {
         CANDIDATES_FILE="$(tmpf candidates.tmp)"
         : > "$CANDIDATES_FILE"
         
-        if [ "$IMPORT_METHOD" = "DUMP" ]; then
+        # [FIX v09.04.02] (B3) Source 가 남긴 매니페스트가 있으면 그 대상 목록을 쓴다.
+        #   로그 파싱은 테이블 없는 스키마를 놓치고, PARFILE 을 쓰면 TABLESPACES= 가 로그에
+        #   남지 않아 항상 실패했다. 매니페스트가 없을 때만 예전 로그 파싱으로 간다.
+        _mf=""
+        [ "$IMPORT_METHOD" = "DUMP" ] && _mf=$(manifest_path)
+        if [ -n "$_mf" ]; then
+            _mf_type=$(sed -n 's/^MIG_TYPE=//p' "$_mf" | head -n 1)
+            _mf_items=$(sed -n 's/^ITEMS=//p' "$_mf" | head -n 1)
+            if [ "$_mf_type" = "$MIG_TYPE" ] && [ -n "$_mf_items" ]; then
+                echo "  >> 이관 매니페스트에서 대상을 읽었습니다: $(basename "$_mf")"
+                echo "$_mf_items" | tr ',' '\n' | sed -e 's/:.*$//' -e '/^$/d' | sort -u > "$CANDIDATES_FILE"
+            else
+                echo "  [경고] 매니페스트의 모드(${_mf_type})가 선택한 모드(${MIG_TYPE})와 달라 로그에서 대상을 찾습니다."
+            fi
+        fi
+
+        if [ -s "$CANDIDATES_FILE" ]; then
+            :
+        elif [ "$IMPORT_METHOD" = "DUMP" ]; then
             # [FIX v07/R3] ls|grep 대신 글롭 순회로 안전하게 목록 구성
             # [FIX v08.02] 공백이 포함된 경로 대응.
             #   v08.01 까지는 파일 목록을 공백으로 이어붙인 뒤 `cat $LOG_FILES` 로 썼기
@@ -6037,6 +6495,13 @@ EOF
                         if [ "$LANG_PREF" = "EN" ]; then printf "     -> Enter new name for '%s': " "${itm}"
                         else printf "     -> '%s'을(를) 대체할 새로운 이름을 입력하세요: " "${itm}"; fi
                         _read new_name
+                        # [FIX v09.04.02] (E6) 대문자화, REMAP_TABLE 은 새 테이블명만 (OWNER. 접두어 제거)
+                        new_name=$(echo "$new_name" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
+                        [ "$MIG_TYPE" = "TABLE" ] && new_name=$(echo "$new_name" | sed 's/^.*\.//')
+                        if ! echo "$new_name" | grep -qE '^[A-Z][A-Z0-9_$#]*$'; then
+                            echo "  [오류] 새 이름 형식이 올바르지 않습니다: '${new_name}'"
+                            return 1
+                        fi
                         if [ "$MIG_TYPE" = "SCHEMA" ]; then REMAP_PARAMS="$REMAP_PARAMS REMAP_SCHEMA=${itm}:${new_name}"
                         elif [ "$MIG_TYPE" = "TABLESPACE" ]; then REMAP_PARAMS="$REMAP_PARAMS REMAP_TABLESPACE=${itm}:${new_name}"
                         elif [ "$MIG_TYPE" = "TABLE" ]; then REMAP_PARAMS="$REMAP_PARAMS REMAP_TABLE=${itm}:${new_name}"
@@ -6211,6 +6676,7 @@ SQL_EOF
 
     if [ "$IMPORT_METHOD" = "DUMP" ]; then
         IMP_DUMPFILES=""
+        PREFIXES=""
         if [ "$DUMP_EXISTS" -gt 0 ]; then
             PREFIXES=$(ls -1 "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}*.dmp 2>/dev/null | sed 's/_[0-9][0-9]*\.dmp$/_%U.dmp/' | awk -F'/' '{print $NF}' | sort | uniq | grep -v '_meta_custom' | grep -v '_stats_')
             for pfx in $PREFIXES; do
@@ -6224,6 +6690,7 @@ SQL_EOF
             IMP_SOURCE_PARAM="DUMPFILE=$IMP_DUMPFILES"
         fi
     fi
+    build_import_sets
 
     if [ "$IMPORT_METHOD" = "NETWORK_LINK" ]; then
         STAT_EXCLUDE=""
@@ -6314,7 +6781,7 @@ SQL_EOF
 EOF
     fi
     cat <<EOF >> "$DDL_EXTRACT_SH"
-impdp PARFILE=$DDL_EXTRACT_PAR
+$(dp_run_lines impdp "$DDL_EXTRACT_PAR")
 EOF
 
     chmod 700 "$DDL_EXTRACT_SH"; chmod 600 "$DDL_EXTRACT_PAR" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
@@ -6406,8 +6873,11 @@ EOF
     fi
 
     if [ "$workflow_opt" = "2" ]; then
-        IMP_P1="impdp_1_table_meta_${UNIQUE_ID}.sh"
-        IMP_P1_PAR="impdp_1_table_meta_${UNIQUE_ID}.par"
+        # [FIX v09.04.02] (E1) 덤프 세트마다 하나씩 만든다
+        while IFS='|' read -r _ds_tag _ds_jtag _ds_src _ds_mig; do
+        [ -z "$_ds_src" ] && continue
+        IMP_P1="impdp_1_table_meta_${UNIQUE_ID}${_ds_tag}.sh"
+        IMP_P1_PAR="impdp_1_table_meta_${UNIQUE_ID}${_ds_tag}.par"
         echo "  * 생성 중: $IMP_P1 및 $IMP_P1_PAR (메타데이터 생성, 인덱스/제약조건/트리거 제외)"
 
         cat <<EOF > "$IMP_P1_PAR"
@@ -6416,14 +6886,14 @@ EOF
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
 USERID="$IMPDP_USERID_STR"
 DIRECTORY=$DIR_OBJ_NAME
-LOGFILE=${UNIQUE_ID}_impdp_p1_table.log
-$MIG_PARAMS
+LOGFILE=${UNIQUE_ID}_impdp_p1_table${_ds_tag}.log
+$_ds_mig
 $REMAP_PARAMS
 STATUS=30
 CONTENT=METADATA_ONLY
 LOGTIME=ALL
 METRICS=YES
-JOB_NAME=${UNIQUE_ID}_IMP_P1
+JOB_NAME=${UNIQUE_ID}_IMP_P1${_ds_jtag}
 EOF
         # [FIX v09.04.00] (B6) 예전 1단계는 INCLUDE=TABLE 이었다. INCLUDE=TABLE 은 테이블에
         #   딸린 인덱스/제약조건/트리거까지 함께 가져오므로, 데이터 적재(2단계) 전에 인덱스와
@@ -6438,7 +6908,7 @@ EOF
             echo "EXCLUDE=INDEX,CONSTRAINT,REF_CONSTRAINT,TRIGGER" >> "$IMP_P1_PAR"
         fi
         if [ -n "$CLUSTER_PARAM" ]; then echo "$CLUSTER_PARAM" >> "$IMP_P1_PAR"; fi
-        if [ -n "$IMP_SOURCE_PARAM" ]; then echo "$IMP_SOURCE_PARAM" >> "$IMP_P1_PAR"; fi
+        if [ -n "$_ds_src" ]; then echo "$_ds_src" >> "$IMP_P1_PAR"; fi
         # Notice: CONTENT=METADATA_ONLY 모드에서는 PARALLEL 제외 (ORA-39144 충돌 방지)
         # [FIX v09.03.01] (B2) 단계별 매핑값을 쓴다 (위 매핑표 참조)
         if [ -n "$TEA_P1_PARAM" ]; then echo "$TEA_P1_PARAM" >> "$IMP_P1_PAR"; fi
@@ -6454,10 +6924,14 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 EOF
         generate_run_prompt "$IMP_P1" "1단계: 메타데이터 생성 (인덱스/제약조건/트리거 제외)"
         cat <<EOF >> "$IMP_P1"
-impdp PARFILE=$IMP_P1_PAR
+$(dp_run_lines impdp "$IMP_P1_PAR")
 EOF
         chmod 700 "$IMP_P1"; chmod 600 "$IMP_P1_PAR" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
         GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $IMP_P1"
+
+        done <<DS_EOF
+$IMPORT_SETS
+DS_EOF
 
         DIS_SQL="impdp_1_1_disable_constraints_${UNIQUE_ID}.sql"
         DIS_SH="impdp_1_1_disable_constraints_${UNIQUE_ID}.sh"
@@ -6595,8 +7069,11 @@ EOF
         chmod 700 "$DIS_SH"
         GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $DIS_SH"
 
-        IMP_P2="impdp_2_data_${UNIQUE_ID}.sh"
-        IMP_P2_PAR="impdp_2_data_${UNIQUE_ID}.par"
+        # [FIX v09.04.02] (E1) 덤프 세트마다 하나씩 만든다
+        while IFS='|' read -r _ds_tag _ds_jtag _ds_src _ds_mig; do
+        [ -z "$_ds_src" ] && continue
+        IMP_P2="impdp_2_data_${UNIQUE_ID}${_ds_tag}.sh"
+        IMP_P2_PAR="impdp_2_data_${UNIQUE_ID}${_ds_tag}.par"
         echo "  * 생성 중: $IMP_P2 및 $IMP_P2_PAR"
 
         cat <<EOF > "$IMP_P2_PAR"
@@ -6605,17 +7082,17 @@ EOF
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
 USERID="$IMPDP_USERID_STR"
 DIRECTORY=$DIR_OBJ_NAME
-LOGFILE=${UNIQUE_ID}_impdp_p2_data.log
-$MIG_PARAMS
+LOGFILE=${UNIQUE_ID}_impdp_p2_data${_ds_tag}.log
+$_ds_mig
 $REMAP_PARAMS
 STATUS=30
 CONTENT=DATA_ONLY
 LOGTIME=ALL
 METRICS=YES
-JOB_NAME=${UNIQUE_ID}_IMP_P2
+JOB_NAME=${UNIQUE_ID}_IMP_P2${_ds_jtag}
 EOF
         if [ -n "$CLUSTER_PARAM" ]; then echo "$CLUSTER_PARAM" >> "$IMP_P2_PAR"; fi
-        if [ -n "$IMP_SOURCE_PARAM" ]; then echo "$IMP_SOURCE_PARAM" >> "$IMP_P2_PAR"; fi
+        if [ -n "$_ds_src" ]; then echo "$_ds_src" >> "$IMP_P2_PAR"; fi
         if [ "$CALC_PARALLEL" -gt 0 ]; then echo "PARALLEL=$CALC_PARALLEL" >> "$IMP_P2_PAR"; fi
         # [NEW v08.05] 네트워크 모드의 병렬 특성을 par 주석으로 남긴다.
         #   PARALLEL 은 "테이블/파티션 단위 워커 수"로만 작동하고 PQ 슬레이브는
@@ -6643,10 +7120,14 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 EOF
         generate_run_prompt "$IMP_P2" "2단계: Data(행) 복구"
         cat <<EOF >> "$IMP_P2"
-impdp PARFILE=$IMP_P2_PAR
+$(dp_run_lines impdp "$IMP_P2_PAR")
 EOF
         chmod 700 "$IMP_P2"; chmod 600 "$IMP_P2_PAR" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
         GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $IMP_P2"
+
+        done <<DS_EOF
+$IMPORT_SETS
+DS_EOF
 
         # [FIX v09.03.01] (B4) 1-1 단계가 기록한 것만 되살린다. FK 는 빠르게 NOVALIDATE 로
         #   켜고, 원래 VALIDATED 였던 FK 는 검증 복원 SQL 을 따로 만들어 둔다
@@ -6762,8 +7243,11 @@ EOF
 
         # [FIX v09.04.00] (B6) 3단계는 모든 모드에서 만든다 (TABLE 모드도 인덱스/제약조건 필요)
         if true; then
-            IMP_P3="impdp_3_rest_${UNIQUE_ID}.sh"
-            IMP_P3_PAR="impdp_3_rest_${UNIQUE_ID}.par"
+            # [FIX v09.04.02] (E1) 덤프 세트마다 하나씩 만든다
+            while IFS='|' read -r _ds_tag _ds_jtag _ds_src _ds_mig; do
+            [ -z "$_ds_src" ] && continue
+            IMP_P3="impdp_3_rest_${UNIQUE_ID}${_ds_tag}.sh"
+            IMP_P3_PAR="impdp_3_rest_${UNIQUE_ID}${_ds_tag}.par"
             echo "  * 생성 중: $IMP_P3 및 $IMP_P3_PAR"
 
             cat <<EOF > "$IMP_P3_PAR"
@@ -6772,16 +7256,16 @@ EOF
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
 USERID="$IMPDP_USERID_STR"
 DIRECTORY=$DIR_OBJ_NAME
-LOGFILE=${UNIQUE_ID}_impdp_p3_rest.log
-$MIG_PARAMS
+LOGFILE=${UNIQUE_ID}_impdp_p3_rest${_ds_tag}.log
+$_ds_mig
 $REMAP_PARAMS
 STATUS=30
 LOGTIME=ALL
 METRICS=YES
-JOB_NAME=${UNIQUE_ID}_IMP_P3
+JOB_NAME=${UNIQUE_ID}_IMP_P3${_ds_jtag}
 EOF
             if [ -n "$CLUSTER_PARAM" ]; then echo "$CLUSTER_PARAM" >> "$IMP_P3_PAR"; fi
-            if [ -n "$IMP_SOURCE_PARAM" ]; then echo "$IMP_SOURCE_PARAM" >> "$IMP_P3_PAR"; fi
+            if [ -n "$_ds_src" ]; then echo "$_ds_src" >> "$IMP_P3_PAR"; fi
             # [FIX v09.04.00] (B6) EXCLUDE=TABLE 은 테이블에 딸린 인덱스/제약조건/트리거까지
             #   빼 버려 3단계에서 정작 필요한 객체가 하나도 만들어지지 않았다. 1단계가 그 네 가지를
             #   빼고 나머지를 모두 만들었으므로 3단계는 그 네 가지만 가져온다.
@@ -6801,15 +7285,22 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 EOF
             generate_run_prompt "$IMP_P3" "3단계: 인덱스/제약조건/트리거 생성 (데이터 적재 후)"
             cat <<EOF >> "$IMP_P3"
-impdp PARFILE=$IMP_P3_PAR
+$(dp_run_lines impdp "$IMP_P3_PAR")
 EOF
             chmod 700 "$IMP_P3"; chmod 600 "$IMP_P3_PAR" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
             GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $IMP_P3"
+
+            done <<DS_EOF
+$IMPORT_SETS
+DS_EOF
         fi
 
     else
-        IMP_ALL="impdp_1_execute_all_${UNIQUE_ID}.sh"
-        IMP_ALL_PAR="impdp_1_execute_all_${UNIQUE_ID}.par"
+        # [FIX v09.04.02] (E1) 덤프 세트마다 하나씩 만든다
+        while IFS='|' read -r _ds_tag _ds_jtag _ds_src _ds_mig; do
+        [ -z "$_ds_src" ] && continue
+        IMP_ALL="impdp_1_execute_all_${UNIQUE_ID}${_ds_tag}.sh"
+        IMP_ALL_PAR="impdp_1_execute_all_${UNIQUE_ID}${_ds_tag}.par"
         echo "  * 생성 중: $IMP_ALL 및 $IMP_ALL_PAR"
 
         cat <<EOF > "$IMP_ALL_PAR"
@@ -6818,16 +7309,16 @@ EOF
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
 USERID="$IMPDP_USERID_STR"
 DIRECTORY=$DIR_OBJ_NAME
-LOGFILE=${UNIQUE_ID}_impdp_all.log
-$MIG_PARAMS
+LOGFILE=${UNIQUE_ID}_impdp_all${_ds_tag}.log
+$_ds_mig
 $REMAP_PARAMS
 STATUS=30
 LOGTIME=ALL
 METRICS=YES
-JOB_NAME=${UNIQUE_ID}_IMP_ALL
+JOB_NAME=${UNIQUE_ID}_IMP_ALL${_ds_jtag}
 EOF
         if [ -n "$CLUSTER_PARAM" ]; then echo "$CLUSTER_PARAM" >> "$IMP_ALL_PAR"; fi
-        if [ -n "$IMP_SOURCE_PARAM" ]; then echo "$IMP_SOURCE_PARAM" >> "$IMP_ALL_PAR"; fi
+        if [ -n "$_ds_src" ]; then echo "$_ds_src" >> "$IMP_ALL_PAR"; fi
         if [ -n "$STAT_EXCLUDE" ]; then echo "$STAT_EXCLUDE" >> "$IMP_ALL_PAR"; fi
         if [ "$CALC_PARALLEL" -gt 0 ]; then echo "PARALLEL=$CALC_PARALLEL" >> "$IMP_ALL_PAR"; fi
         if [ -n "$TABLE_EXISTS_ACTION_PARAM" ]; then echo "$TABLE_EXISTS_ACTION_PARAM" >> "$IMP_ALL_PAR"; fi
@@ -6843,10 +7334,14 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 EOF
         generate_run_prompt "$IMP_ALL" "실제 데이터 통합 impdp"
         cat <<EOF >> "$IMP_ALL"
-impdp PARFILE=$IMP_ALL_PAR
+$(dp_run_lines impdp "$IMP_ALL_PAR")
 EOF
         chmod 700 "$IMP_ALL"; chmod 600 "$IMP_ALL_PAR" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
         GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $IMP_ALL"
+
+        done <<DS_EOF
+$IMPORT_SETS
+DS_EOF
     fi
 
     if [ "$IMPORT_METHOD" = "DUMP" ]; then
@@ -6868,6 +7363,10 @@ EOF
 WHENEVER SQLERROR EXIT FAILURE
 $PDB_SWITCH_SQL
 BEGIN
+  -- [FIX v09.04.02] (E3) Source 가 하위 버전이면 통계 테이블 형식이 달라 IMPORT_*_STATS 가
+  --   ORA-20002 (statistics table is too old) 로 실패한다. 먼저 현재 버전 형식으로 올린다.
+  --   (이미 같은 버전이면 아무것도 하지 않는다)
+  DBMS_STATS.UPGRADE_STAT_TABLE('$STAT_OWN', '$STAT_TAB');
 EOF
 
         if [ "$MIG_TYPE" = "FULL" ]; then
@@ -6887,12 +7386,12 @@ EOF
             IFS_BACKUP=$IFS; IFS=","
             for tbl in $FINAL_LIST; do
                 sch_p=$(echo "$tbl" | cut -d'.' -f1); tbl_p=$(echo "$tbl" | cut -d'.' -f2)
-                target_sch="$sch_p"
-                target_tbl="$tbl_p"
-                if echo "$REMAP_PARAMS" | grep -q "REMAP_TABLE=${tbl}:"; then
-                    new_full=$(echo "$REMAP_PARAMS" | sed -n "s/.*REMAP_TABLE=${tbl}:\([^ ]*\).*/\1/p")
-                    target_sch=$(echo "$new_full" | cut -d'.' -f1)
-                    target_tbl=$(echo "$new_full" | cut -d'.' -f2)
+                # [FIX v09.04.02] (E6) REMAP_TABLE 의 새 이름은 "테이블명" 만 온다 (OWNER 는
+                #   REMAP_SCHEMA 로 따로 바뀐다). 예전에는 새 이름을 OWNER.TABLE 로 잘라
+                #   ownname 에 테이블명이 들어갔다.
+                target_sch=$(remap_lookup REMAP_SCHEMA "$sch_p")
+                target_tbl=$(remap_lookup REMAP_TABLE "$tbl" | sed 's/^.*\.//')
+                if [ "$target_sch" != "$sch_p" ] || [ "$target_tbl" != "$tbl_p" ]; then
                     echo "  UPDATE $STAT_OWN.$STAT_TAB SET C5 = UPPER('$target_sch'), C1 = UPPER('$target_tbl') WHERE UPPER(C5) = UPPER('$sch_p') AND UPPER(C1) = UPPER('$tbl_p');" >> "$IMP_STATS_SQL"
                 fi
                 echo "  DBMS_STATS.IMPORT_TABLE_STATS(ownname => '$target_sch', tabname => '$target_tbl', statown => '$STAT_OWN', stattab => '$STAT_TAB');" >> "$IMP_STATS_SQL"
@@ -6942,7 +7441,7 @@ EOF
         #   스크립트의 종료코드라, impdp 나 통계 반영이 실패해도 0 으로 끝났다.
         cat <<EOF >> "$IMP_STATS_SH"
 echo ">> Stat Table을 임포트 중입니다..."
-impdp PARFILE=$IMP_STATS_PAR
+$(dp_run_lines impdp "$IMP_STATS_PAR")
 _rc_imp=\$?
 _rc_sql=0
 if [ "\$_rc_imp" -ne 0 ]; then
@@ -7042,12 +7541,9 @@ EOF
         IFS_BACKUP=$IFS; IFS=","
         for tbl in $FINAL_LIST; do
             sch_p=$(echo "$tbl" | cut -d'.' -f1); tbl_p=$(echo "$tbl" | cut -d'.' -f2)
-            target_sch="$sch_p"; target_tbl="$tbl_p"
-            if echo "$REMAP_PARAMS" | grep -q "REMAP_TABLE=${tbl}:"; then
-                new_full=$(echo "$REMAP_PARAMS" | sed -n "s/.*REMAP_TABLE=${tbl}:\([^ ]*\).*/\1/p")
-                target_sch=$(echo "$new_full" | cut -d'.' -f1)
-                target_tbl=$(echo "$new_full" | cut -d'.' -f2)
-            fi
+            # [FIX v09.04.02] (E6) REMAP_TABLE 새 이름 = 테이블명만, OWNER 는 REMAP_SCHEMA 기준
+            target_sch=$(remap_lookup REMAP_SCHEMA "$sch_p")
+            target_tbl=$(remap_lookup REMAP_TABLE "$tbl" | sed 's/^.*\.//')
             cat <<EOF >> "$LOCK_SQL"
   BEGIN
     DBMS_STATS.LOCK_TABLE_STATS(ownname => '$target_sch', tabname => '$target_tbl');
@@ -7151,12 +7647,9 @@ EOF
         IFS_BACKUP=$IFS; IFS=","
         for tbl in $FINAL_LIST; do
             sch_p=$(echo "$tbl" | cut -d'.' -f1); tbl_p=$(echo "$tbl" | cut -d'.' -f2)
-            target_sch="$sch_p"; target_tbl="$tbl_p"
-            if echo "$REMAP_PARAMS" | grep -q "REMAP_TABLE=${tbl}:"; then
-                new_full=$(echo "$REMAP_PARAMS" | sed -n "s/.*REMAP_TABLE=${tbl}:\([^ ]*\).*/\1/p")
-                target_sch=$(echo "$new_full" | cut -d'.' -f1)
-                target_tbl=$(echo "$new_full" | cut -d'.' -f2)
-            fi
+            # [FIX v09.04.02] (E6) REMAP_TABLE 새 이름 = 테이블명만, OWNER 는 REMAP_SCHEMA 기준
+            target_sch=$(remap_lookup REMAP_SCHEMA "$sch_p")
+            target_tbl=$(remap_lookup REMAP_TABLE "$tbl" | sed 's/^.*\.//')
             cat <<EOF >> "$UNLOCK_SQL"
   BEGIN
     DBMS_STATS.UNLOCK_TABLE_STATS(ownname => '$target_sch', tabname => '$target_tbl');
@@ -9754,6 +10247,11 @@ sqlplus -S /nolog <<CONNECT_EOF
 connect $(hd_esc "$DB_CONN")
 @${_sq}
 CONNECT_EOF
+EOF
+        if [ "$_sh" = "$DD_COMPARE_SH" ]; then
+            emit_verdict_check "$_sh" "deepdiff_2_compare_${UNIQUE_ID}.log" "DEEP DIFF MUST_MATCH 판정"
+        else
+            cat <<EOF >> "$_sh"
 _rc=\$?
 if [ \$_rc -ne 0 ]; then
     echo ">> [ERROR] sqlplus 종료코드 \$_rc"
@@ -9761,6 +10259,7 @@ if [ \$_rc -ne 0 ]; then
 fi
 echo ">> 완료. 로그를 확인하십시오."
 EOF
+        fi
         chmod 700 "$_sh"
     done
 
@@ -10472,6 +10971,7 @@ connect $(hd_esc "$DB_CONN")
 @${RC_CMP_SQL}
 CONNECT_EOF
 EOF
+    emit_verdict_check "$RC_CMP_SH" "rowcount_5_compare_${UNIQUE_ID}.log" "ROW COUNT 실측 건수 대조"
     chmod 700 "$RC_CMP_SH"
 
     # ---------------- 9) 안전한 작업 중지 ----------------
@@ -11232,8 +11732,8 @@ sqlplus -S /nolog <<CONNECT_EOF
 connect $(hd_esc "$DB_CONN")
 @${HS_CMP_SQL}
 CONNECT_EOF
-echo ">> 완료. 결과: hash_5_compare_${UNIQUE_ID}.log / ${HS_RESULT_CSV}"
 EOF
+    emit_verdict_check "$HS_CMP_SH" "hash_5_compare_${UNIQUE_ID}.log" "HASH 대조 (결과 CSV: ${HS_RESULT_CSV})"
     chmod 700 "$HS_CMP_SH"
     return 0
 }
@@ -11541,17 +12041,19 @@ run_data_integrity_menu() {
         fi
         [ -z "$_di_sel" ] && _di_sel="9"
 
+        # [FIX v09.04.02] (B5) 하위 기능의 실패를 무인 실행 종료코드로 넘긴다
+        _di_rc=0
         case "$_di_sel" in
-            1) run_integrity_check ;;
-            2) run_deep_diff_mode ;;
-            3) run_rowcount_mode ;;
-            4) run_hash_mode ;;
+            1) run_integrity_check; _di_rc=$? ;;
+            2) run_deep_diff_mode; _di_rc=$? ;;
+            3) run_rowcount_mode; _di_rc=$? ;;
+            4) run_hash_mode; _di_rc=$? ;;
             9|q|Q) return 0 ;;
             *) if [ "$LANG_PREF" = "EN" ]; then echo "  Please enter a valid number."; else echo "  올바른 번호를 입력하세요."; fi; sleep 1 ;;
         esac
 
         if [ "$UNATTENDED" = "true" ]; then
-            return 0
+            return "$_di_rc"
         fi
         if [ "$LANG_PREF" = "EN" ]; then printf "  Press Enter to continue: "; else printf "  계속하려면 엔터를 누르세요: "; fi
         _read _dummy
