@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.04.02 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.04.03 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -186,6 +186,45 @@
 #            (B7) 마스터 러너: 도중 실패한 적재 스텝은 확인 없이 재실행하지 않음 (--force-rerun)
 #            (B8) 디스크 여유 공간을 df -Pk 로 (AIX/HP-UX/Solaris 512바이트 단위 2배 과대 계산)
 #            FULL 모드 expdp 에 PARALLEL 적용
+#        - [FIX v09.04.03] 나머지 Bug -> 개선 -> 기능 추가
+#            (B2)  TABLE 모드 크기 산출에 LOB 세그먼트 포함
+#            (B4)  REMAP_TABLESPACE 마법사가 Source 테이블스페이스 목록을 씀 (매니페스트 /
+#                  NETWORK_LINK 는 DB Link) — 가짜 기본 목록 제거, 없으면 직접 입력
+#            (B6)  DB Link 복사: 테이블별 예외 처리(청크 모드), 미완료 청크 작업을 실패로 집계,
+#                  SET DEFINE OFF, 사전 점검이 RESULT: PASS/FAIL 판정 + 래퍼 종료코드,
+#                  원격 대상 범위 필터, 사전점검 -> 복사 -> 검증 마스터 러너 생성
+#            (B9)  Solaris(SunOS) CPU / 메모리 감지 (psrinfo / prtconf)
+#            (B10) PDB 선택 무한 루프 (무인 / 응답 파일 / 터미널 없음 / 5회 실패 시 중단)
+#            (B11) post_validate 로그 대조를 log_match_rows 로 통일, REMAP_SCHEMA / REMAP_TABLE
+#                  반영 (par 로 넘긴 REMAP 은 impdp 로그에 남지 않음)
+#            (B12) 테이블스페이스 목록에서 TEMP / UNDO / SYSTEM / SYSAUX 제외
+#            (B13) 큰따옴표 비밀번호: par 의 USERID 를 작은따옴표로, PDB 접속 문자열 결합 /
+#                  중지 스크립트 / 재개 par 수정
+#            (B14) NETWORK_LINK 용 DB Link 를 Data Pump 접속 계정(PDB 서비스)으로 확인 / 생성
+#            (B15) FK 비활성화 범위에 범위 밖 자식 -> 범위 안 부모(PK/UK) 를 참조하는 FK 포함
+#            (B16) SCHEMA 모드 99 권한에 이관 계정이 "받은" 객체 권한(2-2, 실패는 경고)
+#                  99 권한 생성 SQL 의 PROMPT 가 맨 줄로 들어가 SP2-0734 로 실패하던 문제
+#            (B17) Job 파일 글롭을 \${UID}_* 로 (접두어가 같은 다른 Job 파일이 섞이던 문제)
+#            (B18) 시퀀스 동기화: 대상 스키마 지정, Source:Target 스키마 이름 매핑, +1000 모드 경고
+#            (B19) --run 도움말 1~10, 메뉴 7 DB Link 기본값 안내, Directory 이름 식별자 검증
+#            (개선1) PDB 관리자 기본 비밀번호 고정값 제거(임의 생성, 600 파일),
+#                    사전 계정 DDL 은 CREATE SESSION + Source 의 쿼터 / UNLIMITED TABLESPACE 만
+#            (개선2) Flashback SCN 기본값 Y
+#            (개선3) Data Pump 종료코드 5 분류 (허용 목록 ORA-31684/39151/39082/39111
+#                    + MIG_DP_ALLOW_ORA, 그 밖의 오류면 실패)
+#            (개선4) 마스터 러너 동시 실행 잠금 (.master_lock_<UID>, 남은 잠금 자동 정리)
+#            (개선5) build_exclude_owner_list 의 IFS 백업 변수 분리, 작은따옴표 이중화
+#            (개선6) --strict : 무인 모드에서 사전 검증 FAIL 이면 종료코드 1
+#            (개선7) 체크섬 병렬 계산 MIG_CHECKSUM_PARALLEL
+#            (개선8) 다국어(i18n) 메시지 정리 — 이번 버전은 범위 밖 (메모만)
+#            (개선9) REMAP 새 이름도 Target 에 있으면 중단, 모니터 스크립트를 이 Job 으로 한정
+#            (기능) impdp TRANSFORM=DISABLE_ARCHIVE_LOGGING:Y / LOB_STORAGE:SECUREFILE (12c+)
+#            (기능) 매니페스트 SOURCE_BYTES 로 Target 테이블스페이스 여유 사전 점검
+#            (기능) RUNBOOK_<UID>_<역할>.md 실행 절차서, master_summary_<UID>.json 실행 요약
+#            (기능) 완료 / 실패 알림 MIG_NOTIFY_CMD / MIG_NOTIFY_WEBHOOK
+#            (기능) DB Link 복사 AS OF SCN (복사 시작 시 캡처 또는 지정, 검증도 같은 시점)
+#            (기능) 덤프 병렬 전송 MIG_XFER_PARALLEL
+#            (기능) --check-config (응답 파일 키 점검), --log <FILE> (비밀번호 가린 실행 로그)
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -201,7 +240,7 @@
 # ==============================================================================
 
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.04.02"
+SCRIPT_VERSION="09.04.03"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -300,6 +339,10 @@ CONFIG_FILE=""              # --config 로 읽어들일 응답 정의 파일
 SAVE_CONFIG_FILE=""         # --save-config 로 기록할 응답 저장 파일
 CONFIG_RECORD_FILE=""       # 실행 중 응답을 누적 기록하는 임시 파일
 AUTO_MENU=""                # --run=1|2|... 무인 실행 시 자동 선택할 메뉴 번호
+STRICT_MODE="false"         # [v09.04.03] (개선6) --strict : 무인 모드에서 사전 검증 FAIL 이면 중단
+CHECK_CONFIG="false"        # [v09.04.03] --check-config : 응답 파일 키 점검만 하고 종료
+RUN_LOG_FILE=""             # [v09.04.03] --log <FILE> : 화면 출력을 (접속 비밀번호 가림) 파일에도 남김
+SCRIPT_SELF="$0"
 
 # [NEW v07] 압축 / 체크섬 / 전송 무결성 글로벌 변수
 COMPRESSION_PARAM=""        # COMPRESSION=ALL 등
@@ -378,8 +421,11 @@ Oracle Datapump Migration Helper Tool
   -c, --config <FILE>        저장된 응답 파일을 읽어 프롬프트를 자동 응답
       --save-config <FILE>   이번 실행의 모든 응답을 FILE 로 저장 (재사용용)
   -y, --unattended           무인 모드. 프롬프트를 띄우지 않고 config/기본값 사용
-      --run <N>              무인 모드에서 실행할 메인 메뉴 번호 (1~9)
+      --run <N>              무인 모드에서 실행할 메인 메뉴 번호 (1~10)
       --lang <KO|EN>         언어를 지정 (지정 시 언어 선택 화면 생략)
+      --strict               무인 모드에서 사전 검증(Pre-flight) FAIL 이면 진행하지 않고 1 로 종료
+      --check-config         -c 로 준 응답 파일의 키를 점검(오타/미사용 키, 평문 자격증명)하고 종료
+      --log <FILE>           화면 출력을 FILE 에도 남김 (user/password@ 형태의 비밀번호는 **** 로 가림)
   -h, --help                 이 도움말 출력
 
 무인 배치 실행 예시 / Unattended batch example:
@@ -427,6 +473,19 @@ while [ $# -gt 0 ]; do
         -y|--unattended|--yes)
             UNATTENDED="true"
             ;;
+        --strict)
+            STRICT_MODE="true"
+            ;;
+        --check-config)
+            CHECK_CONFIG="true"
+            ;;
+        --log)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then echo "[ERROR] $1 에 값이 필요합니다 / $1 requires a value"; exit 1; fi
+            shift; RUN_LOG_FILE="$1"
+            ;;
+        --log=*)
+            RUN_LOG_FILE=$(echo "$1" | cut -d'=' -f2-)
+            ;;
         --run)
             if [ $# -lt 2 ] || [ -z "$2" ]; then echo "[ERROR] $1 에 값이 필요합니다 / $1 requires a value"; exit 1; fi
             shift; AUTO_MENU="$1"
@@ -466,7 +525,7 @@ case "$LANG_PREF" in
     ""|KO|EN) : ;;
     *) echo "[ERROR] --lang 값은 KO 또는 EN 이어야 합니다 / --lang must be KO or EN: '$LANG_PREF'"; exit 1 ;;
 esac
-if [ "$UNATTENDED" = "true" ] && [ -z "$AUTO_MENU" ]; then
+if [ "$UNATTENDED" = "true" ] && [ -z "$AUTO_MENU" ] && [ "$CHECK_CONFIG" != "true" ]; then
     echo "[ERROR] --unattended 에는 --run <메뉴번호> 가 필요합니다 / --unattended requires --run N"
     exit 1
 fi
@@ -474,6 +533,18 @@ fi
 # [v09.04.00] (개선1) 이 도구가 만드는 파일(SQL/로그/CSV/HTML/설정)은 접속 정보나 업무 데이터
 #   일부를 담을 수 있다. 기본 권한을 소유자 전용으로 한다. (.sh 는 700, .par 는 600 으로 따로 지정)
 umask 077
+
+# [v09.04.03] (기능) --log : 화면 출력을 파일에도 남긴다. 접속 문자열의 비밀번호는 가린다.
+#   (config 값 출력은 이미 마스킹되지만, 오류 메시지 등에 섞인 user/pw@svc 를 대비)
+if [ -n "$RUN_LOG_FILE" ]; then
+    if ! : >> "$RUN_LOG_FILE" 2>/dev/null; then
+        echo "[ERROR] 로그 파일을 쓸 수 없습니다 / cannot write log file: $RUN_LOG_FILE"
+        exit 1
+    fi
+    exec > >(tee >(sed -e 's#\([A-Za-z0-9_$]\)/"[^"]*"#\1/****#g' \
+                       -e 's#\([A-Za-z0-9_$]\)/[^ /@"]\{1,\}@#\1/****@#g' >> "$RUN_LOG_FILE")) 2>&1
+    echo "[LOG] 실행 로그: $RUN_LOG_FILE (비밀번호 마스킹)"
+fi
 
 # ------------------------------------------------------------------------------
 # [FIX v07/B3] 트랩 분리
@@ -896,9 +967,16 @@ sql_define_off() {
 # ------------------------------------------------------------------------------
 dblink_count() {
     _dlc_name=$(echo "$1" | tr '[:lower:]' '[:upper:]' | sed "s/'/''/g")
+    # [FIX v09.04.03] (B14) 두 번째 인자 dp: Data Pump 가 접속하는 계정 기준으로 본다.
+    #   NETWORK_LINK 는 Data Pump 접속 계정 소유(또는 PUBLIC) 링크만 쓸 수 있다.
+    _dlc_sv_conn="$DB_CONN"; _dlc_sv_sw="$PDB_SWITCH_SQL"
+    if [ "$2" = "dp" ] && [ -n "$PDB_CONNECT_STR" ]; then
+        DB_CONN="$PDB_CONNECT_STR"; PDB_SWITCH_SQL=""
+    fi
     sql_query_num "SELECT 'VAL:' || COUNT(*) FROM dba_db_links
  WHERE (db_link = '${_dlc_name}' OR db_link LIKE REPLACE('${_dlc_name}', '_', '\_') || '.%' ESCAPE '\')
    AND owner IN (USER, 'PUBLIC');"
+    DB_CONN="$_dlc_sv_conn"; PDB_SWITCH_SQL="$_dlc_sv_sw"
 }
 
 # ------------------------------------------------------------------------------
@@ -922,6 +1000,13 @@ create_dblink_live() {
     _cdl_user="$2"
     _cdl_pwd="$3"
     _cdl_tns="$4"
+    # [FIX v09.04.03] (B14) 다섯 번째 인자 dp: Data Pump 접속 계정(PDB_CONNECT_STR)으로 만든다.
+    #   예전에는 메인 접속(sys 등) 소유로 만들어, PDB 서비스로 접속하는 expdp/impdp 계정이
+    #   그 private 링크를 못 써서 ORA-02019 / ORA-39001 로 실패했다.
+    _cdl_conn="$DB_CONN"; _cdl_sw="$PDB_SWITCH_SQL"
+    if [ "$5" = "dp" ] && [ -n "$PDB_CONNECT_STR" ]; then
+        _cdl_conn="$PDB_CONNECT_STR"; _cdl_sw=""
+    fi
 
     # [FIX v09.02] 빈 사용자명/TNS 로 깨진 DDL 을 실행하지 않는다.
     if [ -z "$_cdl_user" ] || [ -z "$_cdl_tns" ]; then
@@ -938,11 +1023,11 @@ create_dblink_live() {
 
     _cdl_out="$(tmpf dblink_create.out)"
     sqlplus -S /nolog > "$_cdl_out" 2>&1 <<SQL_EOF
-connect $DB_CONN
+connect $_cdl_conn
 SET DEFINE OFF
 WHENEVER SQLERROR EXIT FAILURE
 WHENEVER OSERROR EXIT FAILURE
-$PDB_SWITCH_SQL
+$_cdl_sw
 CREATE DATABASE LINK ${_cdl_name} CONNECT TO ${_cdl_user} IDENTIFIED BY "${_cdl_pwd}" USING '${_cdl_tns}';
 EXIT;
 SQL_EOF
@@ -1170,6 +1255,49 @@ check_dir_path_safe() {
     return 1
 }
 
+# ------------------------------------------------------------------------------
+# [v09.04.03] (기능) --check-config : 응답 파일의 키를 이 스크립트가 실제로 묻는 키와 대조
+#   오타 키(예: dl_owner=)는 조용히 무시되고 기본값으로 진행되어, 무인 실행이 의도와
+#   다르게 돌았다. 스크립트 본문에서 _read / _read_secret 로 읽는 이름을 모아 비교한다.
+# ------------------------------------------------------------------------------
+check_config_file() {
+    if [ -z "$CONFIG_FILE" ]; then
+        echo "[ERROR] --check-config 에는 -c/--config <FILE> 이 필요합니다."
+        return 1
+    fi
+    _cc_keys=$( { grep -oE '_read(_secret)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$SCRIPT_SELF" | awk '{print $2}';
+                  echo "LANG_PREF_SAVED"; echo "pdb_choice"; } | sort -u)
+    _cc_bad=0; _cc_n=0; _cc_ln=0
+    while IFS= read -r _cc_line || [ -n "$_cc_line" ]; do
+        _cc_ln=$((_cc_ln + 1))
+        case "$_cc_line" in ''|'#'*) continue ;; esac
+        case "$_cc_line" in
+            *=*) _cc_key="${_cc_line%%=*}" ;;
+            *)   echo "  [형식 오류] ${_cc_ln}행: KEY=VALUE 형식이 아닙니다: ${_cc_line}"; _cc_bad=$((_cc_bad + 1)); continue ;;
+        esac
+        _cc_n=$((_cc_n + 1))
+        if ! echo "$_cc_keys" | grep -qxF "$_cc_key"; then
+            _cc_hint=$(echo "$_cc_keys" | grep -i -- "$(echo "$_cc_key" | cut -c1-4)" | head -n 3 | tr '\n' ' ')
+            echo "  [알 수 없는 키] ${_cc_ln}행: ${_cc_key}${_cc_hint:+   (비슷한 키: ${_cc_hint})}"
+            _cc_bad=$((_cc_bad + 1))
+        fi
+        if is_secretish "$_cc_key" "${_cc_line#*=}" && [ -n "${_cc_line#*=}" ]; then
+            echo "  [보안 주의] ${_cc_ln}행: ${_cc_key} 에 자격증명으로 보이는 값이 평문으로 있습니다 ($(mask_conn_value "${_cc_line#*=}"))."
+        fi
+    done < "$CONFIG_FILE"
+    echo "----------------------------------------------------------------------"
+    if [ "$_cc_bad" -eq 0 ]; then
+        echo "  >> CONFIG OK: ${CONFIG_FILE} (키 ${_cc_n} 개 모두 인식)"
+        return 0
+    fi
+    echo "  >> CONFIG 문제 ${_cc_bad} 건: ${CONFIG_FILE}"
+    return 1
+}
+if [ "$CHECK_CONFIG" = "true" ]; then
+    check_config_file
+    exit $?
+fi
+
 # ---------------------------------------------------------
 if [ -z "$LANG_PREF" ]; then
     if _cfg_lang=$(cfg_get "LANG_PREF_SAVED"); then
@@ -1240,6 +1368,19 @@ detect_os_and_hw() {
             fi
             if [ -z "$CPU_CORES" ] || [ "$CPU_CORES" -eq 0 ]; then
                 CPU_CORES=1
+            fi
+            ;;
+        SunOS)
+            # [FIX v09.04.03] (B9) Solaris 는 기본값(*) 2코어/8GB 로 떨어져 PARALLEL 이 과소
+            #   산정되었다. psrinfo 는 가상 CPU(스레드) 수, prtconf 는 MB 단위 메모리를 준다.
+            CPU_CORES=$(psrinfo 2>/dev/null | grep -c on-line)
+            CPU_CORES=$(to_num "$CPU_CORES")
+            [ "$CPU_CORES" -le 0 ] && CPU_CORES=2
+            mem_mb=$(prtconf 2>/dev/null | awk '/^Memory size:/ {print $3}')
+            if [ "$(to_num "$mem_mb")" -gt 0 ]; then
+                MEM_SIZE="$(( $(to_num "$mem_mb") / 1024 )) GB"
+            else
+                MEM_SIZE="8 GB"
             fi
             ;;
         *)
@@ -1589,6 +1730,10 @@ SQL_EOF
             echo "    N) 신규 PDB 생성/지정 (Create New PDB DDL Mode)"
             echo "----------------------------------------------------------------------"
             
+            # [FIX v09.04.03] (B10) 잘못된 선택이 반복되면 무한 루프였다. 무인 / 응답 파일 / 터미널
+            #   없음에서는 같은 값이 계속 들어오므로(목록이 비었는데 기본값 1 등) 바로 실패로 끝낸다.
+            #   대화형도 5회 실패하면 끝낸다. 반환 2 는 호출부가 작업을 중단하라는 뜻이다.
+            _pdb_try=0
             while true; do
                 if [ "$LANG_PREF" = "EN" ]; then printf "  Select PDB (1-%d or N) [Default: 1]: " "$pdb_count"
                 else printf "  작업 대상 PDB를 선택하세요 (1-%d 또는 N) [기본값: 1]: " "$pdb_count"; fi
@@ -1611,7 +1756,14 @@ SQL_EOF
                         break
                     fi
                 fi
-                echo "  [오류] 올바른 번호 또는 N을 입력하세요."
+                echo "  [오류] 올바른 번호 또는 N을 입력하세요. (입력: ${pdb_choice}, 조회된 PDB ${pdb_count} 개)"
+                _pdb_try=$((_pdb_try + 1))
+                if [ "$UNATTENDED" = "true" ] || cfg_get pdb_choice >/dev/null 2>&1 \
+                   || [ ! -t 0 ] || [ "$_pdb_try" -ge 5 ]; then
+                    echo "  [오류] PDB 를 정하지 못해 중단합니다. (v\$pdbs 조회 권한 / 응답 파일 pdb_choice 확인)"
+                    rm -f "$pdb_idx"
+                    return 2
+                fi
             done
             rm -f "$pdb_idx"
 
@@ -1653,6 +1805,16 @@ SQL_EOF
     return 0
 }
 
+# [FIX v09.04.03] (B19) 새 Directory Object 이름은 따옴표 없는 식별자만 허용한다.
+#   이 이름은 CREATE DIRECTORY / GRANT / par 의 DIRECTORY= 에 그대로 들어간다. 공백, 따옴표,
+#   ';' 가 들어가면 생성 SQL 이 깨지거나 다른 문장이 끼어들 수 있었다.
+valid_dir_obj_name() {
+    if echo "$1" | grep -qE '^[A-Z][A-Z0-9_$#]{0,127}$'; then return 0; fi
+    echo "  [오류] Directory Object 이름 형식이 올바르지 않습니다: '$1'"
+    echo "         영문자로 시작하고 영문/숫자/_ \$ # 만 쓸 수 있습니다 (예: MIG_DIR)."
+    return 1
+}
+
 # DB Directory Object 목록 조회 및 신규 제안
 setup_db_directory() {
     # [NEW v08.03] 함수 스크래치 변수 지역화 — 메뉴 재진입/함수 간 값 누수 차단
@@ -1683,8 +1845,12 @@ SQL_EOF
             while true; do
                 printf "  Directory Object Name (Name): "
                 _read DIR_OBJ_NAME
-                DIR_OBJ_NAME=$(echo "$DIR_OBJ_NAME" | awk '{$1=$1;print}')
-                [ -n "$DIR_OBJ_NAME" ] && break
+                DIR_OBJ_NAME=$(echo "$DIR_OBJ_NAME" | awk '{$1=$1;print}' | tr '[:lower:]' '[:upper:]')
+                if [ -n "$DIR_OBJ_NAME" ]; then
+                    valid_dir_obj_name "$DIR_OBJ_NAME" && break
+                    [ "$UNATTENDED" = "true" ] && return 1
+                    continue
+                fi
                 if [ "$UNATTENDED" = "true" ]; then
                     echo "  [무인모드/ERROR] 필수 입력값이 비어 있습니다. config 파일에 값을 지정하십시오."
                     return 1
@@ -1773,8 +1939,12 @@ CREATE OR REPLACE DIRECTORY $DIR_OBJ_NAME AS '$DIR_PHYSICAL_PATH';"
                 if [ "$LANG_PREF" = "EN" ]; then printf "  Enter New Directory Object Name: "
                 else printf "  새로 생성할 Directory Object 이름을 입력하세요: "; fi
                 _read _sel_name
-                _sel_name=$(echo "$_sel_name" | awk '{$1=$1;print}')
-                [ -n "$_sel_name" ] && break
+                _sel_name=$(echo "$_sel_name" | awk '{$1=$1;print}' | tr '[:lower:]' '[:upper:]')
+                if [ -n "$_sel_name" ]; then
+                    valid_dir_obj_name "$_sel_name" && break
+                    [ "$UNATTENDED" = "true" ] && return 1
+                    continue
+                fi
                 if [ "$UNATTENDED" = "true" ]; then
                     echo "  [무인모드/ERROR] 필수 입력값이 비어 있습니다. config 파일에 값을 지정하십시오."
                     return 1
@@ -2060,10 +2230,15 @@ generate_target_pdb_ddl() {
         if [ "$LANG_PREF" = "EN" ]; then printf "  Enter PDB Admin Password (input hidden, Enter=default): "
         else printf "  PDB 관리자 패스워드를 입력하세요 (입력 숨김, 엔터=기본값): "; fi
         _read_secret pdb_admin_pwd MIG_PDB_ADMIN_PASSWORD
+        # [v09.04.03] (개선1) 고정 기본값(Manager2026!#) 대신 임의 패스워드를 만들어 600 파일에 둔다.
+        #   고정값은 스크립트를 본 누구나 알 수 있었다.
         if [ -z "$pdb_admin_pwd" ]; then
-            pdb_admin_pwd="Manager2026!#"
-            if [ "$LANG_PREF" = "EN" ]; then echo "  [SECURITY WARNING] Default password is used. Change it right after migration."
-            else echo "  [보안 경고] 기본 패스워드가 사용되었습니다. 이관 직후 반드시 변경하십시오."; fi
+            pdb_admin_pwd=$(gen_random_pwd)
+            _pdb_pwd_file="pdb_admin_password_${UNIQUE_ID}.txt"
+            ( umask 077; printf '%s\n' "$pdb_admin_pwd" > "$_pdb_pwd_file" )
+            chmod 600 "$_pdb_pwd_file" 2>/dev/null
+            if [ "$LANG_PREF" = "EN" ]; then echo "  [SECURITY] A random password was generated and saved to $(pwd)/${_pdb_pwd_file} (mode 600)."
+            else echo "  [보안] 임의 패스워드를 만들어 $(pwd)/${_pdb_pwd_file} (권한 600) 에 저장했습니다. 이관 후 변경하고 파일을 지우십시오."; fi
         fi
 
         # [SEC v09.02] IDENTIFIED BY "..." 로 표현 가능한 패스워드인지 먼저 본다.
@@ -2077,7 +2252,7 @@ generate_target_pdb_ddl() {
             if [ "$LANG_PREF" = "EN" ]; then printf "  Re-enter PDB Admin Password (no double quotes): "
             else printf "  PDB 관리자 패스워드를 다시 입력하세요 (큰따옴표 제외): "; fi
             _read_secret pdb_admin_pwd ""
-            [ -z "$pdb_admin_pwd" ] && pdb_admin_pwd="Manager2026!#"
+            [ -z "$pdb_admin_pwd" ] && pdb_admin_pwd=$(gen_random_pwd)
         done
 
         # Check OMF (Oracle Managed Files)
@@ -2434,10 +2609,13 @@ EOF
 connect $conn_str
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 500
 $PDB_SWITCH_SQL
+-- [FIX v09.04.03] (B12) SYSTEM / SYSAUX / UNDO / TEMP 는 이관 대상이 아니다. 예전에는 목록에
+--   들어가, 무인 실행의 기본값(ALL)이 SYSTEM 테이블스페이스까지 export 대상으로 잡았다.
 SELECT t.tablespace_name || '|' || NVL(s.bytes, 0)
 FROM dba_tablespaces${DBLINK_SUFFIX} t
 LEFT JOIN (SELECT tablespace_name, SUM(bytes) bytes FROM dba_segments${DBLINK_SUFFIX} GROUP BY tablespace_name) s
 ON t.tablespace_name = s.tablespace_name
+WHERE t.contents = 'PERMANENT' AND t.tablespace_name NOT IN ('SYSTEM', 'SYSAUX')
 ORDER BY t.tablespace_name;
 EXIT;
 EOF
@@ -2832,7 +3010,9 @@ BEGIN
 END;
 /
 CREATE USER "KMSUNG" IDENTIFIED BY VALUES 'S:MOCKHASH0000000000000000000000000000000000000000000000000000;T:MOCKHASH' DEFAULT TABLESPACE "USERS" TEMPORARY TABLESPACE "TEMP";
-GRANT CONNECT, RESOURCE, CREATE SESSION, UNLIMITED TABLESPACE TO "KMSUNG";
+GRANT CREATE SESSION TO "KMSUNG";
+BEGIN EXECUTE IMMEDIATE 'ALTER USER "KMSUNG" QUOTA UNLIMITED ON "USERS"'; EXCEPTION WHEN OTHERS THEN DBMS_OUTPUT.PUT_LINE('[WARN] KMSUNG : quota on USERS skipped (SQLCODE ' || SQLCODE || ')'); END;
+/
 DECLARE
   v_pw VARCHAR2(40) := 'M' || DBMS_RANDOM.STRING('X', 16) || '#9a';
 BEGIN
@@ -2842,7 +3022,8 @@ EXCEPTION WHEN OTHERS THEN
   IF SQLCODE = -1920 THEN DBMS_OUTPUT.PUT_LINE('SCOTT : already exists - skipped'); ELSE RAISE; END IF;
 END;
 /
-GRANT CONNECT, RESOURCE, CREATE SESSION, UNLIMITED TABLESPACE TO "SCOTT";
+GRANT CREATE SESSION TO "SCOTT";
+GRANT UNLIMITED TABLESPACE TO "SCOTT";
 
 -- [Oracle 23c Compatibility] Grant DB_DEVELOPER_ROLE if available
 BEGIN
@@ -3041,7 +3222,23 @@ BEGIN
       DBMS_OUTPUT.PUT_LINE('END;');
       DBMS_OUTPUT.PUT_LINE('/');
     END IF;
-    DBMS_OUTPUT.PUT_LINE('GRANT CONNECT, RESOURCE, CREATE SESSION, UNLIMITED TABLESPACE TO "' || r.username || '";');
+    DBMS_OUTPUT.PUT_LINE('GRANT CREATE SESSION TO "' || r.username || '";');
+    -- [v09.04.03] (개선1) 예전에는 모든 계정에 CONNECT, RESOURCE, UNLIMITED TABLESPACE 를 줬다
+    --   (Source 보다 넓은 권한). 접속 권한만 주고, 쿼터와 UNLIMITED TABLESPACE 는 Source 에
+    --   있던 것만 옮긴다. 나머지 시스템 권한 / 롤은 impdp 와 99 단계가 옮긴다.
+    --   쿼터 대상 테이블스페이스가 Target 에 없을 수 있으므로(REMAP 등) 실패는 경고로 남긴다.
+    FOR q IN (SELECT tablespace_name, max_bytes FROM dba_ts_quotas${DBLINK_SUFFIX}
+               WHERE username = r.username ORDER BY tablespace_name) LOOP
+      DBMS_OUTPUT.PUT_LINE('BEGIN EXECUTE IMMEDIATE ''ALTER USER "' || r.username || '" QUOTA ' ||
+        CASE WHEN q.max_bytes = -1 THEN 'UNLIMITED' ELSE TO_CHAR(q.max_bytes) END ||
+        ' ON "' || q.tablespace_name || '"''; EXCEPTION WHEN OTHERS THEN DBMS_OUTPUT.PUT_LINE(''[WARN] ' ||
+        r.username || ' : quota on ' || q.tablespace_name || ' skipped (SQLCODE '' || SQLCODE || '')''); END;');
+      DBMS_OUTPUT.PUT_LINE('/');
+    END LOOP;
+    FOR u IN (SELECT 1 x FROM dba_sys_privs${DBLINK_SUFFIX}
+               WHERE grantee = r.username AND privilege = 'UNLIMITED TABLESPACE') LOOP
+      DBMS_OUTPUT.PUT_LINE('GRANT UNLIMITED TABLESPACE TO "' || r.username || '";');
+    END LOOP;
   END LOOP;
 END;
 /
@@ -3162,6 +3359,11 @@ EOF
             IFS=$IFS_BACKUP
 
             _syn_where="WHERE owner = 'PUBLIC'"
+            # [FIX v09.04.03] (B16) SCHEMA 모드에서 이관 계정이 "받은" 권한(다른 스키마 / SYS 객체)
+            #   Data Pump SCHEMA 모드는 자기 객체에 준 권한만 옮기므로, 앱 계정이 받은
+            #   GRANT SELECT ON OTHER.T / SYS.V_$SESSION 등이 Target 에서 사라졌다.
+            #   대상 객체가 Target 에 없을 수 있으므로 하나씩 실행하고 실패는 경고로 남긴다.
+            _recv_priv_where=""
             _tab_priv_where="WHERE $(ora_excl_ctx "grantee")"
             _role_priv_where="WHERE $(ora_excl_ctx "grantee")"
 
@@ -3170,6 +3372,7 @@ EOF
                     _syn_where="WHERE owner = 'PUBLIC' AND table_owner IN ($_dep_in_clause)"
                     _tab_priv_where="WHERE owner IN ($_dep_in_clause) AND $(ora_excl_ctx "grantee")"
                     _role_priv_where="WHERE grantee IN ($_dep_in_clause) AND $(ora_excl_ctx "grantee")"
+                    _recv_priv_where="WHERE grantee IN ($_dep_in_clause) AND owner NOT IN ($_dep_in_clause)"
                 elif [ "$MIG_TYPE" = "TABLE" ]; then
                     _syn_where="WHERE owner = 'PUBLIC' AND table_owner || '.' || table_name IN ($_dep_in_clause)"
                     _tab_priv_where="WHERE owner || '.' || table_name IN ($_dep_in_clause) AND $(ora_excl_ctx "grantee")"
@@ -3179,10 +3382,34 @@ EOF
 
             # [FIX v09.03.02] (B9) 조회 결과를 바로 붙이지 않고 오류부터 본다. 예전에는
             #   2>/dev/null 로 붙여서 "ORA-00942 ..." 같은 오류 문구가 생성 SQL 에 섞여 들어갔다.
+            # [FIX v09.04.03] (B16) 2-2 섹션: 이관 계정이 받은 객체 권한 (SCHEMA 모드만)
+            _recv_sql=""
+            if [ -n "$_recv_priv_where" ]; then
+                _recv_sql="
+PROMPT PROMPT ========================================================================
+PROMPT PROMPT 2-2. Object Privileges RECEIVED by migrated users (other schemas / SYS)
+PROMPT PROMPT      실패(대상 객체 없음 등)는 [WARN] 으로만 남기고 계속합니다.
+PROMPT PROMPT ========================================================================
+SELECT 'BEGIN EXECUTE IMMEDIATE ''GRANT ' || p.privilege ||
+       CASE WHEN d.directory_name IS NOT NULL
+            THEN ' ON DIRECTORY \"' || p.table_name || '\"'
+            ELSE ' ON \"' || p.owner || '\".\"' || p.table_name || '\"' END ||
+       ' TO \"' || p.grantee || '\"' ||
+       CASE WHEN p.grantable = 'YES' THEN ' WITH GRANT OPTION' END ||
+       '''; EXCEPTION WHEN OTHERS THEN DBMS_OUTPUT.PUT_LINE(''  [WARN] skipped: GRANT ' || p.privilege ||
+       ' ON ' || p.owner || '.' || p.table_name || ' TO ' || p.grantee ||
+       ' (SQLCODE '' || SQLCODE || '')''); END;' || CHR(10) || '/'
+FROM (SELECT * FROM dba_tab_privs${DBLINK_SUFFIX} $_recv_priv_where) p
+LEFT JOIN dba_directories${DBLINK_SUFFIX} d
+  ON d.owner = p.owner AND d.directory_name = p.table_name
+ORDER BY p.grantee, p.owner, p.table_name;
+"
+            fi
+
             _gen_out="$(tmpf dep_gen.out)"
             sqlplus -S /nolog <<SQL_EOF > "$_gen_out" 2>&1
 connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 500 TRIMSPOOL ON
+SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 4000 TRIMSPOOL ON
 $PDB_SWITCH_SQL
 
 -- [v09.03.02] (E12) 원격 객체를 가리키는 시노님은 @db_link 를 붙여야 같은 대상을 가리킨다.
@@ -3192,9 +3419,12 @@ FROM dba_synonyms${DBLINK_SUFFIX}
 $_syn_where
 ORDER BY table_owner, synonym_name;
 
-PROMPT ========================================================================
-PROMPT 2. Granting Object Privileges to Other Users / Roles
-PROMPT ========================================================================
+-- [FIX v09.04.03] 이 조회 세션의 PROMPT 는 생성 SQL 에 "글자 그대로" 들어간다. 예전에는
+--   PROMPT ==== 의 출력(====)이 99 SQL 에 맨 줄로 남아 실행 시 SP2-0734 로 실패 판정되었다.
+--   PROMPT PROMPT 로 써서 생성 SQL 에 PROMPT 줄이 들어가게 한다 (사전 DDL 생성부와 동일).
+PROMPT PROMPT ========================================================================
+PROMPT PROMPT 2. Granting Object Privileges to Other Users / Roles
+PROMPT PROMPT ========================================================================
 -- [v09.03.02] (E12) DIRECTORY 권한은 GRANT ... ON DIRECTORY "이름" 으로 줘야 한다.
 --   예전에는 ON "SYS"."이름" 으로 만들어 실행 시 실패했다. 11g 에는 dba_tab_privs.type
 --   컬럼이 없으므로 dba_directories 와 대조해서 판별한다.
@@ -3208,10 +3438,10 @@ FROM (SELECT * FROM dba_tab_privs${DBLINK_SUFFIX} $_tab_priv_where) p
 LEFT JOIN dba_directories${DBLINK_SUFFIX} d
   ON d.owner = p.owner AND d.directory_name = p.table_name
 ORDER BY p.owner, p.table_name, p.grantee;
-
-PROMPT ========================================================================
-PROMPT 3. Granting Role Privileges to Target Users
-PROMPT ========================================================================
+${_recv_sql}
+PROMPT PROMPT ========================================================================
+PROMPT PROMPT 3. Granting Role Privileges to Target Users
+PROMPT PROMPT ========================================================================
 SELECT 'GRANT "' || granted_role || '" TO "' || grantee || '"' ||
        CASE WHEN admin_option = 'YES' THEN ' WITH ADMIN OPTION;' ELSE ';' END
 FROM dba_role_privs${DBLINK_SUFFIX}
@@ -3318,13 +3548,34 @@ if [ ! -w "\$SRC_DIR" ]; then
     exit 1
 fi
 
+# [v09.04.03] (개선7) MIG_CHECKSUM_PARALLEL=N 이면 N 개 파일을 동시에 계산한다 (기본 1).
+#   수백 GB 덤프는 파일 하나씩 MD5 를 구하면 전송보다 오래 걸렸다. 디스크 I/O 여유만큼만 올리십시오.
+CK_PAR="\${MIG_CHECKSUM_PARALLEL:-1}"
+echo "\$CK_PAR" | grep -qE '^[1-9][0-9]*\$' || CK_PAR=1
+[ "\$CK_PAR" -gt 1 ] && echo "  - 병렬 계산 : \$CK_PAR"
+_ck_tmp="./.md5_tmp_\$\$"
+mkdir -p "\$_ck_tmp" || exit 1
+trap 'rm -f "\$_ck_tmp"/*.md5; rmdir "\$_ck_tmp" 2>/dev/null' EXIT
+_launch=0
+for f in "\$SRC_DIR"/${UNIQUE_ID}_*.dmp; do
+    [ -e "\$f" ] || continue
+    ( md5_of "\$f" > "\$_ck_tmp/\$(basename "\$f").md5" ) &
+    _launch=\$((_launch + 1))
+    [ \$((_launch % CK_PAR)) -eq 0 ] && wait
+done
+wait
+
 : > "\$MANIFEST"
 _cnt=0
-for f in "\$SRC_DIR"/${UNIQUE_ID}*.dmp; do
+for f in "\$SRC_DIR"/${UNIQUE_ID}_*.dmp; do
     [ -e "\$f" ] || continue
-    _sum=\$(md5_of "\$f")
+    _sum=\$(cat "\$_ck_tmp/\$(basename "\$f").md5" 2>/dev/null)
     if [ "\$_sum" = "NO_MD5_TOOL" ]; then
         echo "  [ERROR] 이 서버에서 MD5 도구(md5sum/digest/csum/openssl)를 찾을 수 없습니다."
+        exit 1
+    fi
+    if [ -z "\$_sum" ]; then
+        echo "  [ERROR] 체크섬 계산 실패: \$(basename "\$f")"
         exit 1
     fi
     printf '%s  %s\n' "\$_sum" "\$(basename "\$f")" >> "\$MANIFEST"
@@ -3333,7 +3584,7 @@ for f in "\$SRC_DIR"/${UNIQUE_ID}*.dmp; do
 done
 
 if [ \$_cnt -eq 0 ]; then
-    echo "  [WARN] 체크섬 대상 덤프 파일이 없습니다: \$SRC_DIR/${UNIQUE_ID}*.dmp"
+    echo "  [WARN] 체크섬 대상 덤프 파일이 없습니다: \$SRC_DIR/${UNIQUE_ID}_*.dmp"
     exit 1
 fi
 echo "======================================================================"
@@ -3384,6 +3635,23 @@ fi
 RESULT_CSV="./checksum_result_${UNIQUE_ID}.csv"
 : > "\$RESULT_CSV"
 
+# [v09.04.03] (개선7) MIG_CHECKSUM_PARALLEL=N 이면 N 개 파일을 동시에 계산한다 (기본 1).
+CK_PAR="\${MIG_CHECKSUM_PARALLEL:-1}"
+echo "\$CK_PAR" | grep -qE '^[1-9][0-9]*\$' || CK_PAR=1
+[ "\$CK_PAR" -gt 1 ] && echo "  - 병렬 계산 : \$CK_PAR"
+_ck_tmp="./.md5_tmp_\$\$"
+mkdir -p "\$_ck_tmp" || exit 1
+trap 'rm -f "\$_ck_tmp"/*.md5; rmdir "\$_ck_tmp" 2>/dev/null' EXIT
+_launch=0
+while read -r _exp_sum _fname; do
+    [ -z "\$_fname" ] && continue
+    [ -f "\${TGT_DIR}/\${_fname}" ] || continue
+    ( md5_of "\${TGT_DIR}/\${_fname}" > "\$_ck_tmp/\${_fname}.md5" ) &
+    _launch=\$((_launch + 1))
+    [ \$((_launch % CK_PAR)) -eq 0 ] && wait
+done < "\$MANIFEST"
+wait
+
 _ok=0; _ng=0; _miss=0
 while read -r _exp_sum _fname; do
     [ -z "\$_fname" ] && continue
@@ -3393,7 +3661,7 @@ while read -r _exp_sum _fname; do
         printf '%s|%s|%s|%s\n' "\$_fname" "\$_exp_sum" "-" "MISSING" >> "\$RESULT_CSV"
         _miss=\$((_miss + 1)); continue
     fi
-    _act_sum=\$(md5_of "\$_target")
+    _act_sum=\$(cat "\$_ck_tmp/\${_fname}.md5" 2>/dev/null)
     if [ "\$_act_sum" = "\$_exp_sum" ]; then
         printf "  %-45s | %-10s\n" "\$_fname" "[일치]"
         printf '%s|%s|%s|%s\n' "\$_fname" "\$_exp_sum" "\$_act_sum" "MATCH" >> "\$RESULT_CSV"
@@ -3448,7 +3716,9 @@ COL STATE FORMAT A15
 PROMPT [1. DBA_DATAPUMP_JOBS Status]
 SELECT owner_name, job_name, operation, job_mode, state, degree, attached_sessions 
 FROM dba_datapump_jobs 
-WHERE job_name LIKE '%${UNIQUE_ID}%' OR job_name LIKE '%META%' OR job_name LIKE '%EXP%' OR job_name LIKE '%IMP%';
+-- [v09.04.03] (개선9) 이 Job 의 작업만. 예전에는 이름에 META/EXP/IMP 가 든 다른 작업
+--   (다른 팀의 Data Pump, SYS_EXPORT_* 등)까지 섞여 나왔다.
+WHERE job_name LIKE '%${UNIQUE_ID}%';
 
 PROMPT
 PROMPT [2. V\$SESSION_LONGOPS Progress]
@@ -3459,8 +3729,8 @@ SELECT opname, target_desc, sofar, totalwork,
        ROUND(sofar/NULLIF(totalwork,0)*100, 2) || '%' AS PROGRESS, 
        time_remaining AS REMAIN_SEC
 FROM v\$session_longops 
-WHERE (opname LIKE '%EXPORT%' OR opname LIKE '%IMPORT%' OR opname LIKE '%DATAPUMP%') 
-  AND totalwork > 0;
+WHERE opname LIKE '%${UNIQUE_ID}%'
+  AND totalwork > 0 AND sofar < totalwork;
 EXIT;
 SQL_EOF
 EOF
@@ -3481,8 +3751,9 @@ printf "중지할 Data Pump JOB_NAME을 입력하세요 (예: ${UNIQUE_ID}_EXP_G
 read job_name_input
 [ -z "\$job_name_input" ] && job_name_input="${UNIQUE_ID}_EXP_G"
 
-_dp_conn_target="$(hd_esc "$DB_CONN")"
-[ -n "$(hd_esc "$PDB_CONNECT_STR")" ] && _dp_conn_target="$(hd_esc "$PDB_CONNECT_STR")"
+# [FIX v09.04.03] (B13) 큰따옴표 비밀번호(system/"p@ss"@DB)가 셸 따옴표에 먹혀 사라지지 않게
+#   작은따옴표로 박고, par 에는 값에 " 가 있으면 USERID='...' 로 쓴다.
+_dp_conn_target=$(sh_quote "${PDB_CONNECT_STR:-$DB_CONN}")
 
 echo ">> Data Pump Job '\$job_name_input' 에 접속합니다..."
 echo ">> 프롬프트(Export> 또는 Import>)가 나오면 아래 순서대로 입력하세요:"
@@ -3491,7 +3762,8 @@ echo "   2) Are you sure... 되물음에 'YES' 입력"
 # [SEC v08.01] attach 시에도 접속 문자열이 ps 에 노출되지 않도록 임시 PARFILE 사용
 _dp_par="./.dp_attach_\$\$.par"
 _old_umask=\$(umask); umask 077
-printf 'USERID="%s"\\nATTACH=%s\\n' "\$_dp_conn_target" "\$job_name_input" > "\$_dp_par"
+case "\$_dp_conn_target" in *\"*) _uq="'" ;; *) _uq='"' ;; esac
+printf 'USERID=%s%s%s\\nATTACH=%s\\n' "\$_uq" "\$_dp_conn_target" "\$_uq" "\$job_name_input" > "\$_dp_par"
 umask "\$_old_umask"
 trap 'rm -f "\$_dp_par"' EXIT INT TERM
 expdp PARFILE="\$_dp_par" 2>/dev/null || impdp PARFILE="\$_dp_par"
@@ -3504,6 +3776,97 @@ EOF
 }
 
 # 마스터 실행 파이프라인 러너 (00_RUN_ALL_MASTER.sh) 생성 함수
+# ------------------------------------------------------------------------------
+# [v09.04.03] (기능) 실행 런북(RUNBOOK_<UID>_<역할>.md)
+#   마스터 러너와 같은 스텝 목록으로, 사람이 읽고 체크하며 따라갈 수 있는 절차서를 만든다.
+#   변경 승인 / 작업 계획서에 그대로 붙일 수 있게 스텝 설명, 실패 시 조치, 재개 방법을 담는다.
+# ------------------------------------------------------------------------------
+runbook_step_desc() {
+    case "$1" in
+        expdp_00_capture_scn_*)        echo "일관성 기준 SCN 캡처 (이후 모든 expdp 가 같은 시점으로 추출)" ;;
+        expdp_0_meta_*)                echo "메타데이터 전용 expdp" ;;
+        expdp_execute_*)               echo "데이터 expdp (덤프 세트별)" ;;
+        export_dbms_stats_*)           echo "옵티마이저 통계 export" ;;
+        checksum_create_*)             echo "덤프 MD5 체크섬 매니페스트 생성" ;;
+        checksum_verify_*)             echo "전송된 덤프 MD5 검증 (불일치 시 impdp 금지)" ;;
+        00_create_target_pdb_*)        echo "Target PDB 생성 / OPEN" ;;
+        00_create_target_env_*)        echo "사전 계정 / 테이블스페이스 / 프로파일 / 롤 DDL" ;;
+        impdp_0_extract_ddl_*)         echo "DDL 추출 (SQLFILE, 실제 적용 없음 - 검토용)" ;;
+        impdp_1_table_meta_*)          echo "1단계: 테이블 메타데이터 생성 (인덱스/제약/트리거 제외)" ;;
+        impdp_1_1_disable_constraints_*) echo "FK / 트리거 비활성화 (끈 목록은 SYSTEM.MIG_DISABLED_OBJ 에 기록)" ;;
+        impdp_1_execute_all_*)         echo "통합 impdp (메타 + 데이터)" ;;
+        impdp_2_data_*)                echo "2단계: 데이터 적재 (적재 스텝 - 도중 실패 시 재실행 주의)" ;;
+        impdp_2_1_enable_constraints_*) echo "FK / 트리거 원복 (1-1 단계가 끈 것만)" ;;
+        impdp_3_rest_*)                echo "3단계: 인덱스 / 제약 / 트리거 생성" ;;
+        impdp_4_post_validate_*)       echo "사후 검증 (재컴파일, 객체/용량, 로그 건수 대조)" ;;
+        import_dbms_stats_*)           echo "옵티마이저 통계 import" ;;
+        lock_stats_*)                  echo "통계 잠금" ;;
+        99_post_grants_synonyms_*)     echo "후행 권한 / Public Synonym" ;;
+        dblink_0_precheck_*)           echo "DB Link 복사 사전 점검 (LONG / 대상 테이블 존재)" ;;
+        dblink_1_copy_*)               echo "DB Link 데이터 복사 (적재 스텝)" ;;
+        dblink_9_verify_*)             echo "DB Link 복사 건수 대조" ;;
+        deep_diff_*|*deepdiff*)        echo "DEEP DIFF 딕셔너리 대조" ;;
+        *)                             echo "-" ;;
+    esac
+}
+
+generate_runbook() {
+    _rb_role="$1"; _rb_steps="$2"; _rb_runner="$3"
+    _rb_slug=$(echo "$_rb_role" | awk '{print toupper($1)}' | tr -dc 'A-Z0-9_')
+    RUNBOOK_MD="RUNBOOK_${UNIQUE_ID}_${_rb_slug:-PIPELINE}.md"
+    {
+        echo "# 이관 런북 — ${_rb_role}"
+        echo ""
+        echo "| 항목 | 값 |"
+        echo "|---|---|"
+        echo "| Job ID | \`${UNIQUE_ID}\` |"
+        echo "| 생성 | $(date '+%Y-%m-%d %H:%M:%S') / $(hostname 2>/dev/null) / Migration Helper v${SCRIPT_VERSION} |"
+        [ -n "$MIG_TYPE" ] && echo "| 이관 모드 | ${MIG_TYPE} |"
+        [ -n "$FINAL_LIST$SCHEMAS_LIST$TABLES_LIST$TBS_LIST" ] && echo "| 대상 | ${FINAL_LIST:-$SCHEMAS_LIST$TABLES_LIST$TBS_LIST} |"
+        [ -n "$DIR_PHYSICAL_PATH" ] && echo "| 덤프 디렉터리 | \`${DIR_OBJ_NAME}\` = \`${DIR_PHYSICAL_PATH}\` |"
+        [ -n "$SELECTED_PDB" ] && echo "| PDB | ${SELECTED_PDB} |"
+        [ -n "$REMAP_PARAMS" ] && echo "| REMAP | \`$(echo $REMAP_PARAMS)\` |"
+        echo "| 접속 | $(mask_conn_value "${PDB_CONNECT_STR:-$DB_CONN}") |"
+        echo ""
+        echo "## 시작 전 확인"
+        echo ""
+        echo "- [ ] 변경 승인 / 작업 창 확보, 업무 중지(또는 증분 계획) 확인"
+        echo "- [ ] 사전 검증 결과 확인 (\`preflight_result_${UNIQUE_ID}.csv\`)"
+        echo "- [ ] 덤프 디렉터리 여유 공간 / Target 테이블스페이스 여유 확인"
+        echo "- [ ] 원복 계획 확인 (아래 '실패 시')"
+        echo ""
+        echo "## 실행"
+        echo ""
+        echo "한 번에 실행: \`bash ${_rb_runner} -y\`  (진행 확인: \`bash ${_rb_runner} --list\`)"
+        echo ""
+        echo "| # | 완료 | 스크립트 | 내용 | 시작 | 종료 | 비고 |"
+        echo "|---|---|---|---|---|---|---|"
+        _rb_i=0
+        for _rb_s in $_rb_steps; do
+            _rb_i=$((_rb_i + 1))
+            echo "| ${_rb_i} | [ ] | \`${_rb_s}\` | $(runbook_step_desc "$_rb_s") | | | |"
+        done
+        echo ""
+        echo "## 실패 시"
+        echo ""
+        echo "1. 마스터 로그 \`master_run_${UNIQUE_ID}.log\` 와 해당 스텝 로그에서 원인 확인"
+        echo "2. 조치 후 재개: \`bash ${_rb_runner} -y --resume\` (성공한 스텝은 건너뜀)"
+        echo "3. 적재 스텝(impdp_2_data / impdp_1_execute_all / dblink_1_copy)이 도중에 끝났다면"
+        echo "   중복 적재를 막기 위해 러너가 멈춥니다. 대상 테이블을 비운 뒤 \`--force-rerun\` 을 붙이거나"
+        echo "   메뉴 9(RESUME) 로 Data Pump 작업을 ATTACH / START_JOB 하십시오."
+        echo "4. FK / 트리거를 끈 상태로 중단했다면 \`impdp_2_1_enable_constraints_${UNIQUE_ID}.sh\` 로 원복"
+        echo "5. 실행 결과 요약: \`master_summary_${UNIQUE_ID}.json\`"
+        echo ""
+        echo "## 완료 후"
+        echo ""
+        echo "- [ ] 건수 / 해시 대조 (메뉴 7-3 ROW COUNT, 7-4 HASH) 및 HTML 감사 보고서(메뉴 3)"
+        echo "- [ ] Invalid 객체 / 시퀀스 동기화 (메뉴 7-1)"
+        echo "- [ ] DISABLE_ARCHIVE_LOGGING 을 썼다면 즉시 백업"
+        echo "- [ ] 임시 비밀번호 파일(pdb_admin_password_*.txt) / 접속 정보가 든 par·sql 파일 삭제 또는 안전한 곳으로 이동"
+    } > "$RUNBOOK_MD"
+    echo "  * 생성 중: $RUNBOOK_MD (사람용 실행 절차서)"
+}
+
 generate_master_runner_script() {
     _runner_role="$1"
     _script_list="$2"
@@ -3633,9 +3996,94 @@ if [ "\$LIST_ONLY" = "true" ]; then
     exit 0
 fi
 
+# [v09.04.03] (개선4) 같은 Job 의 러너가 동시에 두 번 돌지 않게 잠근다 (mkdir 는 원자적).
+#   두 번 돌면 같은 테이블에 이중 적재 / 같은 덤프 파일명 충돌(ORA-27038)이 난다.
+#   잠금을 잡은 프로세스가 이미 없으면(kill -9 / 서버 재기동) 남은 잠금을 치우고 진행한다.
+LOCK_DIR=".master_lock_${UNIQUE_ID}"
+if ! mkdir "\$LOCK_DIR" 2>/dev/null; then
+    _lock_pid=\$(cat "\$LOCK_DIR/pid" 2>/dev/null)
+    if [ -n "\$_lock_pid" ] && kill -0 "\$_lock_pid" 2>/dev/null; then
+        echo ">> [중단] 이 Job 의 마스터 러너가 이미 실행 중입니다 (PID \$_lock_pid, 잠금: \$LOCK_DIR)."
+        exit 1
+    fi
+    echo ">> [경고] 이전 실행이 남긴 잠금을 정리합니다 (PID \${_lock_pid:-?} 없음): \$LOCK_DIR"
+    rm -f "\$LOCK_DIR/pid"; rmdir "\$LOCK_DIR" 2>/dev/null
+    if ! mkdir "\$LOCK_DIR" 2>/dev/null; then
+        echo ">> [중단] 잠금을 잡지 못했습니다: \$LOCK_DIR"
+        exit 1
+    fi
+fi
+echo \$\$ > "\$LOCK_DIR/pid"
+release_lock() { rm -f "\$LOCK_DIR/pid"; rmdir "\$LOCK_DIR" 2>/dev/null; }
+
+# [v09.04.03] (기능) 실행 요약 JSON + 완료/실패 알림
+#   master_summary_${UNIQUE_ID}.json : 스텝별 결과 / 소요 시간 / 종료코드 (모니터링 수집용)
+#   알림 (둘 다 선택):
+#     MIG_NOTIFY_CMD='mailx -s "\$1" dba@example.com < master_summary_${UNIQUE_ID}.json'
+#         -> sh -c 로 실행, \$1 = 한 줄 요약. MIG_NOTIFY_STATUS / MIG_NOTIFY_RC 도 넘어간다.
+#     MIG_NOTIFY_WEBHOOK=https://hooks.example.com/...  -> curl 로 {"text": "요약"} POST
+SUMMARY_JSON="master_summary_${UNIQUE_ID}.json"
+STEP_RESULTS=""
+RUN_STARTED=0
+add_result() { STEP_RESULTS="\${STEP_RESULTS}\$1|\$2|\$3|\$4
+"; }
+json_esc() { printf '%s' "\$1" | sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g'; }
+write_summary() {
+    _ws_rc=\$1; _ws_st="COMPLETED"; [ "\$_ws_rc" -ne 0 ] && _ws_st="FAILED"
+    {
+        printf '{\\n'
+        printf '  "job_id": "%s",\\n' "\$(json_esc "${UNIQUE_ID}")"
+        printf '  "pipeline": "%s",\\n' "\$(json_esc "${_runner_role}")"
+        printf '  "status": "%s",\\n  "exit_code": %s,\\n' "\$_ws_st" "\$_ws_rc"
+        printf '  "host": "%s",\\n' "\$(json_esc "\$(hostname 2>/dev/null)")"
+        printf '  "finished_at": "%s",\\n' "\$(date '+%Y-%m-%d %H:%M:%S')"
+        printf '  "elapsed_sec": %s,\\n' "\$((SECONDS - \${START_EPOCH:-0}))"
+        printf '  "total_steps": %s,\\n  "failed_steps": %s,\\n  "skipped_steps": %s,\\n' "\$total_steps" "\${failed_steps:-0}" "\${skipped_steps:-0}"
+        printf '  "steps": ['
+        _ws_first=1
+        while IFS='|' read -r _ws_n _ws_f _ws_s _ws_e; do
+            [ -z "\$_ws_n" ] && continue
+            [ "\$_ws_first" = 1 ] || printf ','
+            printf '\\n    {"no": %s, "script": "%s", "status": "%s", "elapsed_sec": %s}' \\
+                "\$_ws_n" "\$(json_esc "\$_ws_f")" "\$_ws_s" "\${_ws_e:-0}"
+            _ws_first=0
+        done <<WS_EOF
+\$STEP_RESULTS
+WS_EOF
+        printf '\\n  ]\\n}\\n'
+    } > "\$SUMMARY_JSON"
+}
+notify_run() {
+    _nr_msg="[Oracle Migration] ${UNIQUE_ID} (${_runner_role}) \$1 rc=\$2 failed=\${failed_steps:-0} host=\$(hostname 2>/dev/null)"
+    if [ -n "\$MIG_NOTIFY_CMD" ]; then
+        MIG_NOTIFY_STATUS="\$1" MIG_NOTIFY_RC="\$2" sh -c "\$MIG_NOTIFY_CMD" notify "\$_nr_msg" >/dev/null 2>&1 \\
+            || log_msg ">> [WARN] MIG_NOTIFY_CMD 실행 실패"
+    fi
+    if [ -n "\$MIG_NOTIFY_WEBHOOK" ]; then
+        if command -v curl >/dev/null 2>&1; then
+            curl -s -m 15 -H 'Content-Type: application/json' \\
+                -d "{\\"text\\": \\"\$(json_esc "\$_nr_msg")\\"}" "\$MIG_NOTIFY_WEBHOOK" >/dev/null 2>&1 \\
+                || log_msg ">> [WARN] MIG_NOTIFY_WEBHOOK 전송 실패"
+        else
+            log_msg ">> [WARN] curl 이 없어 MIG_NOTIFY_WEBHOOK 을 보낼 수 없습니다"
+        fi
+    fi
+}
+on_exit() {
+    _oe_rc=\$?
+    if [ "\$RUN_STARTED" = 1 ]; then
+        write_summary "\$_oe_rc"
+        if [ "\$_oe_rc" -eq 0 ]; then notify_run COMPLETED 0; else notify_run FAILED "\$_oe_rc"; fi
+    fi
+    release_lock
+}
+trap on_exit EXIT
+trap 'exit 130' INT TERM
+
 # [FIX v09.04.01] Solaris/AIX/HP-UX 기본 date 는 %s 를 지원하지 않아, 0 이 되거나 오류 없이
 #   글자 그대로("%s") 나와 아래 산술식이 깨졌다. 이 러너는 bash 로 돌므로 내장 SECONDS 를 쓴다.
 START_EPOCH=\$SECONDS
+RUN_STARTED=1
 
 log_msg "====================================================================="
 log_msg "  [START] Oracle Datapump Master Pipeline Execution (${_runner_role})"
@@ -3654,6 +4102,7 @@ for s_file in \$STEP_LIST; do
 
     if [ "\$step_num" -lt "\$FROM_STEP" ]; then
         log_msg ">> [SKIP] Step \$step_num/\$total_steps (--from \$FROM_STEP): \$s_file"
+        add_result "\$step_num" "\$s_file" SKIP 0
         skipped_steps=\$((skipped_steps + 1))
         continue
     fi
@@ -3661,12 +4110,14 @@ for s_file in \$STEP_LIST; do
     # [NEW v07] 재개 모드: 이미 성공한 스텝은 건너뛴다
     if [ "\$RESUME" = "true" ] && is_done "\$s_file"; then
         log_msg ">> [RESUME-SKIP] Step \$step_num/\$total_steps 이미 완료됨: \$s_file"
+        add_result "\$step_num" "\$s_file" DONE_BEFORE 0
         skipped_steps=\$((skipped_steps + 1))
         continue
     fi
 
     if [ ! -f "\$s_file" ]; then
         log_msg ">> [WARN] 스텝 파일이 없어 건너뜁니다: \$s_file"
+        add_result "\$step_num" "\$s_file" MISSING 0
         skipped_steps=\$((skipped_steps + 1))
         continue
     fi
@@ -3698,7 +4149,7 @@ for s_file in \$STEP_LIST; do
         read _step_ans
         case "\$_step_ans" in
             q|Q) log_msg ">> User requested abort. Pipeline stopped."; exit 1 ;;
-            n|N) log_msg ">> Skipped step: \$s_file"; skipped_steps=\$((skipped_steps + 1)); continue ;;
+            n|N) log_msg ">> Skipped step: \$s_file"; add_result "\$step_num" "\$s_file" SKIP 0; skipped_steps=\$((skipped_steps + 1)); continue ;;
         esac
     fi
 
@@ -3740,13 +4191,16 @@ for s_file in \$STEP_LIST; do
 
     if [ \$step_rc -eq 0 ]; then
         log_msg ">> [PASS] \$s_file completed successfully (Elapsed: \${step_duration}s)"
+        add_result "\$step_num" "\$s_file" PASS "\$step_duration"
         mark_done "\$s_file"
     elif [ \$step_rc -eq \$RC_USER_SKIPPED ]; then
         # 실행하지 않았으므로 DONE 을 남기지 않는다 -> --resume 때 다시 실행 대상이 된다.
         log_msg ">> [SKIP-USER] \$s_file : 사용자가 실행을 보류했습니다 (체크포인트 미기록)"
+        add_result "\$step_num" "\$s_file" SKIP "\$step_duration"
         skipped_steps=\$((skipped_steps + 1))
     else
         failed_steps=\$((failed_steps + 1))
+        add_result "\$step_num" "\$s_file" FAIL "\$step_duration"
         log_msg ">> [FAIL] \$s_file exited with return code: \$step_rc"
         if [ "\$UNATTENDED" = "true" ]; then
             log_msg ">> 무인 모드: 오류로 파이프라인을 중단합니다."
@@ -3783,11 +4237,13 @@ log_msg "  - Total Duration : \${hours}h \${mins}m \${secs}s (\${TOTAL_ELAPSED} 
 log_msg "  - Skipped Steps  : \$skipped_steps"
 log_msg "  - Master Log     : \$MASTER_LOG"
 log_msg "  - Checkpoint     : \$STATE_FILE"
+log_msg "  - Summary (JSON) : \$SUMMARY_JSON"
 log_msg "====================================================================="
 [ \$failed_steps -eq 0 ] || exit 1
 EOF
 
     chmod 700 "$MASTER_RUNNER_SH"
+    generate_runbook "$_runner_role" "$_clean_steps" "$MASTER_RUNNER_SH"
 }
 
 # ==============================================================================
@@ -4145,7 +4601,13 @@ join_pdb_connect() {
         _jp_role=" as sysoper"
     fi
 
-    _jp_cred=$(echo "$_jp_base" | sed -e 's/@.*//' -e 's/[ 	][ 	]*[Aa][Ss][ 	].*$//')
+    # [FIX v09.04.03] (B13) 큰따옴표로 감싼 비밀번호 안의 '@' 에서 끊지 않는다.
+    #   system/"p@ss"@CDB -> 예전: system/"p  (따옴표 짝이 깨진 접속 문자열)
+    if echo "$_jp_base" | grep -q '^[^/@ 	]*/"[^"]*"'; then
+        _jp_cred=$(echo "$_jp_base" | sed 's#^\([^/@ 	]*/"[^"]*"\).*#\1#')
+    else
+        _jp_cred=$(echo "$_jp_base" | sed -e 's/@.*//' -e 's/[ 	][ 	]*[Aa][Ss][ 	].*$//')
+    fi
     _jp_svc_clean=$(echo "$_jp_svc" | sed 's/^@//')
     echo "${_jp_cred}@${_jp_svc_clean}${_jp_role}"
     return 0
@@ -4224,6 +4686,45 @@ run_preflight_checks() {
         fi
     fi
 
+    # [v09.04.03] (기능) Target 용량 사전 점검 — Source 매니페스트의 SOURCE_BYTES 와 비교
+    #   Target 의 영구 테이블스페이스(SYSTEM/SYSAUX/UNDO 제외) 최대 크기(autoextend 상한 포함)
+    #   에서 이미 쓴 양을 뺀 값을 여유로 본다. 사전 DDL 로 새 테이블스페이스를 만들 수도 있으므로
+    #   부족해도 WARN 으로만 알린다.
+    if [ "$_pf_mode" = "TARGET" ] && [ "$IMPORT_METHOD" = "DUMP" ]; then
+        _pf_mf=$(manifest_path)
+        _pf_src_bytes=""
+        [ -n "$_pf_mf" ] && _pf_src_bytes=$(grep '^SOURCE_BYTES=' "$_pf_mf" | tail -n 1 | cut -d= -f2 | tr -dc '0-9')
+        if [ -n "$_pf_src_bytes" ] && [ "$_pf_src_bytes" -gt 0 ]; then
+            if [ "$MOCK_MODE" = "true" ]; then
+                _pf_tgt_free=107374182400
+            else
+                _pf_tgt_free=$(sql_query_num "SELECT 'VAL:' || GREATEST(0, ROUND(
+  (SELECT NVL(SUM(CASE WHEN autoextensible = 'YES' THEN GREATEST(maxbytes, bytes) ELSE bytes END), 0)
+     FROM dba_data_files f JOIN dba_tablespaces t ON t.tablespace_name = f.tablespace_name
+    WHERE t.contents = 'PERMANENT' AND t.tablespace_name NOT IN ('SYSTEM', 'SYSAUX'))
+- (SELECT NVL(SUM(s.bytes), 0)
+     FROM dba_segments s JOIN dba_tablespaces t ON t.tablespace_name = s.tablespace_name
+    WHERE t.contents = 'PERMANENT' AND t.tablespace_name NOT IN ('SYSTEM', 'SYSAUX')))) FROM dual;")
+            fi
+            printf "   [INFO] Source 이관 대상 크기 : %s (매니페스트)\n" "$(human_bytes "$_pf_src_bytes")"
+            if [ -z "$_pf_tgt_free" ]; then
+                echo "   [WARN] Target 테이블스페이스 여유를 조회하지 못했습니다 (권한 확인)"
+                pf_record "CAPACITY" "Target 테이블스페이스 여유" "WARN" "조회 실패"
+                _pf_warn=$((_pf_warn + 1))
+            else
+                printf "   [INFO] Target 테이블스페이스 여유 : %s (autoextend 상한 포함)\n" "$(human_bytes "$_pf_tgt_free")"
+                if [ "$_pf_tgt_free" -lt $((_pf_src_bytes + _pf_src_bytes / 10)) ]; then
+                    echo "   [WARN] Target 여유가 Source 크기(+10%)보다 작습니다. 데이터파일 추가 / 사전 DDL 의 테이블스페이스 크기를 확인하십시오."
+                    pf_record "CAPACITY" "Target 테이블스페이스 여유" "WARN" "필요 $(human_bytes "$_pf_src_bytes") / 여유 $(human_bytes "$_pf_tgt_free")"
+                    _pf_warn=$((_pf_warn + 1))
+                else
+                    echo "   [ OK ] Target 테이블스페이스 여유 충분"
+                    pf_record "CAPACITY" "Target 테이블스페이스 여유" "OK" "필요 $(human_bytes "$_pf_src_bytes") / 여유 $(human_bytes "$_pf_tgt_free")"
+                fi
+            fi
+        fi
+    fi
+
     # 4) 버전 호환성
     if ! check_version_compatibility; then
         _pf_warn=$((_pf_warn + 1))
@@ -4267,7 +4768,12 @@ run_preflight_checks() {
 
     if [ "$PREFLIGHT_RESULT" = "FAIL" ]; then
         if [ "$UNATTENDED" = "true" ]; then
-            echo "  [무인모드] 치명적 문제가 있어 계속 진행하지만, 실행 전 반드시 조치하십시오."
+            # [v09.04.03] (개선6) --strict 이면 무인 모드에서도 여기서 멈춘다 (종료코드 1).
+            if [ "$STRICT_MODE" = "true" ]; then
+                echo "  [무인모드/--strict] 사전 검증 FAIL 이므로 중단합니다."
+                return 1
+            fi
+            echo "  [무인모드] 치명적 문제가 있어 계속 진행하지만, 실행 전 반드시 조치하십시오. (중단하려면 --strict)"
             return 0
         fi
         if [ "$LANG_PREF" = "EN" ]; then printf "  Continue anyway? (y/N) [Default: N]: "
@@ -4278,6 +4784,33 @@ run_preflight_checks() {
         fi
     fi
     return 0
+}
+
+# ------------------------------------------------------------------------------
+# [v09.04.03] (개선1) 임의 패스워드: 영문 대소문자 + 숫자 16자 + 고정 접미사(#9a, 복잡도 규칙 대응)
+#   /dev/urandom 이 없으면 시각/PID/RANDOM 의 해시로 대신한다.
+gen_random_pwd() {
+    _gp=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 16)
+    if [ "${#_gp}" -lt 16 ]; then
+        _gp=$( (date; echo "$$ $RANDOM $RANDOM") | cksum | awk '{print $1}')$( (echo "$RANDOM"; date) | cksum | awk '{print $1}')
+    fi
+    echo "P${_gp}#9a"
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.04.03] (B13) par 파일의 USERID 줄
+#   예전에는 USERID="..." 로 고정해, 비밀번호를 큰따옴표로 감싼 접속 문자열
+#   (system/"p@ss"@DB)이 USERID="system/"p@ss"@DB" 가 되어 Data Pump 가 값을 잘못 읽었다.
+#   값에 " 가 있으면 작은따옴표로 감싼다. 두 따옴표가 모두 있으면 표현할 수 없으므로 경고한다.
+# ------------------------------------------------------------------------------
+par_userid() {
+    case "$1" in
+        *\"*\'*|*\'*\"*)
+            echo "  [경고] 접속 문자열에 작은따옴표와 큰따옴표가 함께 있어 par 에 안전하게 쓸 수 없습니다." >&2
+            printf "USERID='%s'\n" "$1" ;;
+        *\"*) printf "USERID='%s'\n" "$1" ;;
+        *)    printf 'USERID="%s"\n' "$1" ;;
+    esac
 }
 
 # ------------------------------------------------------------------------------
@@ -4295,7 +4828,7 @@ if [ "\$_vc_rc" -ne 0 ]; then
     exit "\$_vc_rc"
 fi
 if grep -q 'RESULT: FAIL' "$2" 2>/dev/null; then
-    echo ">> [FAIL] $3 - 불일치가 있습니다. 로그: $2"
+    echo ">> [FAIL] $3 - 판정 결과 FAIL (불일치 / 점검 실패). 로그: $2"
     grep 'RESULT: FAIL' "$2" | sed 's/^ */     /'
     exit 1
 fi
@@ -4343,6 +4876,36 @@ DRL_EOF
     else
         echo "${_dr_bin} PARFILE=${_dr_par}"
     fi
+    # [v09.04.03] (개선3) 종료코드 5(작업은 끝났지만 오류 있음) 분류
+    #   예전에는 5 를 그대로 실패로 넘겨, "이미 존재(ORA-31684)" 같은 재실행 경고만 있어도
+    #   마스터 러너가 멈췄다. 로그의 ORA- 코드가 전부 허용 목록이면 경고와 함께 0 으로 바꾸고,
+    #   하나라도 다른 코드가 있으면 그 코드를 보여주고 5 로 끝낸다.
+    #   허용 목록 추가: 실행 시 MIG_DP_ALLOW_ORA="ORA-01917,ORA-00001" (쉼표 구분)
+    cat <<DRL_EOF
+_dp_rc=\$?
+if [ "\$_dp_rc" -eq 5 ]; then
+    _dp_log=\$(sed -n 's/^LOGFILE=//p' "${_dr_par}" | head -n 1)
+    _dp_log="\${_dp_log##*:}"
+    _dp_logp=$(sh_quote "$DIR_PHYSICAL_PATH")/"\$_dp_log"
+    _dp_allow='ORA-31684|ORA-39151|ORA-39082|ORA-39111'
+    _dp_extra=\$(echo "\$MIG_DP_ALLOW_ORA" | grep -oE '[0-9]{5}' | sed 's/^/ORA-/' | tr '\\n' '|' | sed 's/|\$//')
+    [ -n "\$_dp_extra" ] && _dp_allow="\$_dp_allow|\$_dp_extra"
+    if [ -n "\$_dp_log" ] && [ -f "\$_dp_logp" ]; then
+        _dp_bad=\$(grep -oE 'ORA-[0-9]{5}' "\$_dp_logp" | sort -u | grep -vE "^(\$_dp_allow)\\\$")
+        if [ -z "\$_dp_bad" ]; then
+            echo ">> [경고] ${_dr_bin} 종료코드 5 - 허용 목록 오류만 있어 성공으로 처리합니다 (\$_dp_allow)"
+            echo ">>        로그: \$_dp_logp"
+            _dp_rc=0
+        else
+            echo ">> [실패] ${_dr_bin} 종료코드 5 - 허용되지 않은 오류: \$(echo \$_dp_bad)"
+            echo ">>        로그: \$_dp_logp  (허용 추가: MIG_DP_ALLOW_ORA=ORA-xxxxx)"
+        fi
+    else
+        echo ">> [실패] ${_dr_bin} 종료코드 5 - 로그를 찾지 못해 오류 내용을 분류하지 못했습니다: \$_dp_logp"
+    fi
+fi
+( exit "\$_dp_rc" )
+DRL_EOF
 }
 
 # [FIX v09.04.02] (E5) 실행 시점 SCN 캡처 스텝
@@ -4394,10 +4957,34 @@ SCN_EOF
 write_migration_manifest() {
     _mf_items="$SCHEMAS_LIST$TABLES_LIST$TBS_LIST"
     [ "$MIG_TYPE" = "FULL" ] && _mf_items="FULL"
+    # [FIX v09.04.03] (B4) 이관 객체가 쓰는 Source 테이블스페이스 목록도 남긴다.
+    #   Target 의 REMAP_TABLESPACE 마법사가 예전에는 Target 자신의 딕셔너리를 읽었다.
+    _mf_ts=""
+    if [ "$MOCK_MODE" = "true" ]; then
+        _mf_ts="USERS,TS_DATA"
+    else
+        case "$MIG_TYPE" in
+            SCHEMA)     _mf_pred="owner IN ($(sql_in_list "$SCHEMAS_LIST"))" ;;
+            TABLE)      _mf_pred="owner || '.' || segment_name IN ($(sql_in_list "$(echo "$TABLES_LIST" | sed 's/:[^,]*//g')"))" ;;
+            TABLESPACE) _mf_pred="tablespace_name IN ($(sql_in_list "$TBS_LIST"))" ;;
+            *)          _mf_pred="$(ora_excl_ctx "owner")" ;;
+        esac
+        _mf_ts=$(sql_query_text "SELECT 'VAL:' || LISTAGG(tablespace_name, ',') WITHIN GROUP (ORDER BY tablespace_name)
+  FROM (SELECT DISTINCT tablespace_name FROM dba_segments${DBLINK_SUFFIX}
+         WHERE ${_mf_pred} AND tablespace_name NOT IN ('SYSTEM', 'SYSAUX'));")
+    fi
+    # [v09.04.03] (기능) Source 이관 대상 세그먼트 총량 (인덱스 포함) — Target 용량 사전 점검용
+    if [ "$MOCK_MODE" = "true" ]; then
+        _mf_bytes=64424509440
+    else
+        _mf_bytes=$(sql_query_num "SELECT 'VAL:' || NVL(SUM(bytes), 0) FROM dba_segments${DBLINK_SUFFIX} WHERE ${_mf_pred};")
+    fi
     _mf_body="# Oracle Migration Helper v${SCRIPT_VERSION} manifest - do not edit
 UNIQUE_ID=${UNIQUE_ID}
 MIG_TYPE=${MIG_TYPE}
-ITEMS=${_mf_items}"
+ITEMS=${_mf_items}
+TABLESPACES=${_mf_ts}
+SOURCE_BYTES=${_mf_bytes}"
     if [ -n "$SMALL_ITEMS" ]; then
         _mf_body="${_mf_body}
 SET|GROUP|${SMALL_ITEMS}"
@@ -4453,7 +5040,7 @@ run_source_mode() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
     calculate_parallel_degree
 
     echo "----------------------------------------------------------------------"
@@ -4490,7 +5077,7 @@ run_source_mode() {
 
         if [ "$MOCK_MODE" != "true" ]; then
             # [FIX v09.03.02] (B11/B15) 공통 함수로 확인. 조회 실패면 추측하지 않고 멈춘다.
-            link_cnt=$(dblink_count "$DBLINK_NAME")
+            link_cnt=$(dblink_count "$DBLINK_NAME" dp)
             if [ -z "$link_cnt" ]; then
                 if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] Could not check whether DB Link '$DBLINK_NAME' exists (connection / privilege)."
                 else echo "  [오류] DB Link '$DBLINK_NAME' 존재 여부를 확인하지 못했습니다 (접속/권한 확인)."; fi
@@ -4506,7 +5093,7 @@ run_source_mode() {
 
                 # [v09.02] 복붙돼 있던 heredoc 을 공통 함수로 돌린다.
                 #   패스워드 특수문자 검사 + SET DEFINE OFF + 종료코드 판정이 들어간다.
-                if ! create_dblink_live "$DBLINK_NAME" "$src_user" "$src_pwd" "$src_tns"; then
+                if ! create_dblink_live "$DBLINK_NAME" "$src_user" "$src_pwd" "$src_tns" dp; then
                     if [ "$LANG_PREF" = "EN" ]; then
                         echo "  >> NETWORK_LINK export cannot proceed without the DB Link."
                     else
@@ -4685,12 +5272,14 @@ run_source_mode() {
     flush_preflight_csv
 
     echo "----------------------------------------------------------------------"
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Use Flashback SCN for consistent dump? (y/n) [Default: n]: "
-    else printf "  Flashback SCN 옵션을 사용하여 일관성 있는 덤프를 수행하시겠습니까? (y/n) [기본값: n]: "; fi
+    # [v09.04.03] (개선2) 기본값을 Y 로. 운영 중 Source 에서 SCN 없이 받으면 테이블마다 시점이
+    #   달라 FK 부모/자식이 어긋난 덤프가 나온다. 끄려면 n 을 명시한다.
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Use Flashback SCN for consistent dump? (Y/n) [Default: Y]: "
+    else printf "  Flashback SCN 옵션을 사용하여 일관성 있는 덤프를 수행하시겠습니까? (Y/n) [기본값: Y]: "; fi
     _read use_scn
     FLASHBACK_PARAM=""
     FLASHBACK_RUNTIME="N"
-    if [ "$use_scn" = "y" ] || [ "$use_scn" = "Y" ]; then
+    if [ -z "$use_scn" ] || [ "$use_scn" = "y" ] || [ "$use_scn" = "Y" ]; then
         # [FIX v09.04.02] (E5) 기본은 "실행 시점" SCN 이다. 파이프라인 첫 스텝이 현재 SCN 을
         #   파일에 남기고, 모든 expdp 가 그 값을 FLASHBACK_SCN 으로 쓴다.
         #   특정 시점이 필요하면 SCN 을 직접 입력한다 (그 값이 par 에 고정된다).
@@ -4774,7 +5363,7 @@ run_source_mode() {
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
 #   커맨드라인에 두면 같은 서버의 다른 OS 계정이 ps -ef 로 패스워드를
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
-USERID="$EXPDP_USERID_STR"
+$(par_userid "$EXPDP_USERID_STR")
 DIRECTORY=$DIR_OBJ_NAME
 DUMPFILE=${UNIQUE_ID}_meta_custom_%U.dmp
 LOGFILE=${UNIQUE_ID}_expdp_meta_custom.log
@@ -4859,18 +5448,26 @@ SELECT tablespace_name || '|' || SUM(bytes) FROM dba_segments${DBLINK_SUFFIX} WH
 EXIT;
 EOF
         elif [ "$MIG_TYPE" = "TABLE" ]; then
-            COND=""
-            IFS_BACKUP=$IFS; IFS=","
-            for itm in $ITEM_LIST; do
-                own_part=$(echo "$itm" | cut -d'.' -f1); tab_part=$(echo "$itm" | cut -d'.' -f2)
-                [ -n "$COND" ] && COND="$COND OR "
-                COND="$COND(owner='$own_part' AND segment_name='$tab_part')"
-            done
-            IFS=$IFS_BACKUP
+            # [FIX v09.04.03] (B2) LOB 세그먼트(SYS_LOB...)도 더한다. 예전에는 세그먼트명 = 테이블명
+            #   인 것만 더해, LOB 이 큰 테이블이 기준 미만으로 분류되어 병렬 없는 GROUP 으로 갔다.
+            #   튜플은 한 줄에 하나씩 쓴다 (SQL*Plus 줄 길이 제한 회피).
+            _sz_tuples=$(echo "$ITEM_LIST" | tr ',' '\n' | sed -e '/^$/d' -e 's/:.*$//' -e "s/'/''/g" \
+                | awk -F'.' '{printf "%s(\047%s\047,\047%s\047)\n", (NR>1?",":""), $1, $2}')
             cat <<EOF > "$size_check_sql"
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 500
 $PDB_SWITCH_SQL
-SELECT owner || '.' || segment_name || '|' || SUM(bytes) FROM dba_segments${DBLINK_SUFFIX} WHERE $COND GROUP BY owner, segment_name;
+SELECT owner || '.' || table_name || '|' || SUM(bytes) FROM (
+  SELECT s.owner, s.segment_name AS table_name, s.bytes FROM dba_segments${DBLINK_SUFFIX} s
+   WHERE (s.owner, s.segment_name) IN (
+$_sz_tuples
+)
+  UNION ALL
+  SELECT l.owner, l.table_name, s.bytes FROM dba_lobs${DBLINK_SUFFIX} l
+    JOIN dba_segments${DBLINK_SUFFIX} s ON s.owner = l.owner AND s.segment_name = l.segment_name
+   WHERE (l.owner, l.table_name) IN (
+$_sz_tuples
+)
+) GROUP BY owner, table_name;
 EXIT;
 EOF
         fi
@@ -4924,7 +5521,7 @@ CONNECT_EOF
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
 #   커맨드라인에 두면 같은 서버의 다른 OS 계정이 ps -ef 로 패스워드를
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
-USERID="$EXPDP_USERID_STR"
+$(par_userid "$EXPDP_USERID_STR")
 DIRECTORY=$DIR_OBJ_NAME
 LOGFILE=${UNIQUE_ID}_expdp_estimate_${_exp_suffix}.log
 $_exp_m_params
@@ -4957,7 +5554,7 @@ EOF
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
 #   커맨드라인에 두면 같은 서버의 다른 OS 계정이 ps -ef 로 패스워드를
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
-USERID="$EXPDP_USERID_STR"
+$(par_userid "$EXPDP_USERID_STR")
 DIRECTORY=$DIR_OBJ_NAME
 DUMPFILE=${UNIQUE_ID}_${_exp_suffix}_%U.dmp
 LOGFILE=${UNIQUE_ID}_expdp_${_exp_suffix}.log
@@ -5094,7 +5691,7 @@ EOF
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
 #   커맨드라인에 두면 같은 서버의 다른 OS 계정이 ps -ef 로 패스워드를
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
-USERID="$EXPDP_USERID_STR"
+$(par_userid "$EXPDP_USERID_STR")
 DIRECTORY=$DIR_OBJ_NAME
 DUMPFILE=${UNIQUE_ID}_stats_%U.dmp
 LOGFILE=${UNIQUE_ID}_expdp_stats.log
@@ -5240,7 +5837,36 @@ log "  - Retry  : \$MAX_RETRY"
 log "====================================================================="
 
 _sent=0; _failed=0
-for f in "\$SRC_DIR"/${UNIQUE_ID}_*.dmp "\$SRC_DIR"/${UNIQUE_ID}_*.log "\$SRC_DIR"/${UNIQUE_ID}_dumpfiles.md5 "\$SRC_DIR"/${UNIQUE_ID}_manifest.txt ./${UNIQUE_ID}_manifest.txt; do
+
+# [v09.04.03] (기능) MIG_XFER_PARALLEL=N 이면 덤프(.dmp)를 N 개씩 동시에 보낸다 (기본 1).
+#   파일 하나씩 보내면 회선 대역을 다 쓰지 못하는 경우가 많다. 로그 / 체크섬 / 매니페스트는
+#   덤프가 모두 끝난 뒤 순서대로 보낸다 (Target 이 매니페스트를 보고 덤프가 다 왔다고 판단하지 않게).
+XFER_PAR="\${MIG_XFER_PARALLEL:-1}"
+echo "\$XFER_PAR" | grep -qE '^[1-9][0-9]*\$' || XFER_PAR=1
+[ "\$XFER_PAR" -gt 1 ] && log "  - Parallel: \$XFER_PAR"
+_st_dir="./.xfer_st_\$\$"
+mkdir -p "\$_st_dir" || exit 1
+trap 'rm -f "\$_st_dir"/*; rmdir "\$_st_dir" 2>/dev/null' EXIT
+_launch=0
+for f in "\$SRC_DIR"/${UNIQUE_ID}_*.dmp; do
+    [ -e "\$f" ] || continue
+    ( if send_one "\$f"; then echo OK; else echo FAIL; fi > "\$_st_dir/\$(basename "\$f").st" ) &
+    _launch=\$((_launch + 1))
+    [ \$((_launch % XFER_PAR)) -eq 0 ] && wait
+done
+wait
+for f in "\$SRC_DIR"/${UNIQUE_ID}_*.dmp; do
+    [ -e "\$f" ] || continue
+    if [ "\$(cat "\$_st_dir/\$(basename "\$f").st" 2>/dev/null)" = "OK" ]; then
+        log "   [ OK ] \$(basename "\$f")"
+        _sent=\$((_sent + 1))
+    else
+        log "   [FAIL] \$(basename "\$f") - 최대 재시도 초과"
+        _failed=\$((_failed + 1))
+    fi
+done
+
+for f in "\$SRC_DIR"/${UNIQUE_ID}_*.log "\$SRC_DIR"/${UNIQUE_ID}_dumpfiles.md5 "\$SRC_DIR"/${UNIQUE_ID}_manifest.txt ./${UNIQUE_ID}_manifest.txt; do
     [ -e "\$f" ] || continue
     if send_one "\$f"; then
         log "   [ OK ] \$(basename "\$f")"
@@ -5377,10 +6003,20 @@ EOF
 generate_dblink_copy_scripts() {
     # [v09.02] local 제거 (ksh 비호환): _dl_tbl _dl_hint _dl_mode_desc
     DL_PRE_SQL="dblink_0_precheck_${UNIQUE_ID}.sql"
+    DL_PRE_SH="dblink_0_precheck_${UNIQUE_ID}.sh"
     DL_COPY_SQL="dblink_1_copy_${UNIQUE_ID}.sql"
     DL_COPY_SH="dblink_1_copy_${UNIQUE_ID}.sh"
     DL_VERIFY_SQL="dblink_9_verify_${UNIQUE_ID}.sql"
     DL_VERIFY_SH="dblink_9_verify_${UNIQUE_ID}.sh"
+    # [v09.04.03] (기능) AS OF SCN 값을 복사/검증 SQL 이 같이 읽는 작은 SQL 파일
+    DL_SCN_SQL="dblink_scn_${UNIQUE_ID}.sql"
+    case "$DL_ASOF_MODE" in
+        FIXED)   echo "EXEC :g_scn := ${DL_ASOF_SCN}" > "$DL_SCN_SQL" ;;
+        CAPTURE) echo "-- 복사 래퍼(${DL_COPY_SH})가 실행 시 원격 SCN 을 캡처해 이 파일을 덮어씁니다." > "$DL_SCN_SQL" ;;
+        *)       echo "-- AS OF SCN 미사용" > "$DL_SCN_SQL" ;;
+    esac
+    DL_SCN_HDR="VARIABLE g_scn NUMBER
+@@${DL_SCN_SQL}"
 
     if [ "$DL_PARALLEL_MODE" = "CHUNK" ]; then
         _dl_hint=""
@@ -5399,10 +6035,16 @@ generate_dblink_copy_scripts() {
 --  이 단계에서 FAIL 이 나오면 해당 테이블은 DB Link 방식으로 옮길 수 없습니다.
 -- ==============================================================================
 SET SERVEROUTPUT ON SIZE UNLIMITED LINESIZE 200 PAGESIZE 100 FEEDBACK OFF
+SET DEFINE OFF
 WHENEVER SQLERROR CONTINUE
 SPOOL dblink_0_precheck_${UNIQUE_ID}.log
 
 ${PDB_SWITCH_SQL}
+
+-- [FIX v09.04.03] (B6) 점검 결과를 모아 마지막에 RESULT: PASS / FAIL 로 판정한다.
+--   예전에는 FAIL 을 화면에만 찍고 끝나, 래퍼도 마스터 러너도 성공으로 보았다.
+VARIABLE g_fail NUMBER
+EXEC :g_fail := 0
 
 PROMPT ========================================================================
 PROMPT 1. DB Link 도달성
@@ -5413,7 +6055,8 @@ BEGIN
   DBMS_OUTPUT.PUT_LINE('  ${DL_LINK_NAME} : ' || v);
 EXCEPTION WHEN OTHERS THEN
   DBMS_OUTPUT.PUT_LINE('  ${DL_LINK_NAME} : *** ' || SUBSTR(SQLERRM,1,120));
-  RAISE_APPLICATION_ERROR(-20910, 'DB Link 접속 실패 - 이후 단계를 진행할 수 없습니다.');
+  DBMS_OUTPUT.PUT_LINE('  [FAIL] DB Link 접속 실패 - 이후 단계를 진행할 수 없습니다.');
+  :g_fail := :g_fail + 1;
 END;
 /
 
@@ -5426,7 +6069,7 @@ BEGIN
   FOR r IN (SELECT owner, table_name, column_name, data_type
               FROM dba_tab_columns@${DL_LINK_NAME}
              WHERE data_type IN ('LONG','LONG RAW')
-               AND owner IN (${DL_OWNER_IN})) LOOP
+               AND owner IN (${DL_OWNER_IN})${DL_TABLE_FILTER_REMOTE}) LOOP
     DBMS_OUTPUT.PUT_LINE('  *** ' || r.owner || '.' || r.table_name ||
                          '.' || r.column_name || ' (' || r.data_type || ')');
     n := n + 1;
@@ -5434,6 +6077,7 @@ BEGIN
   IF n > 0 THEN
     DBMS_OUTPUT.PUT_LINE('  ------------------------------------------------------');
     DBMS_OUTPUT.PUT_LINE('  [FAIL] LONG/LONG RAW ' || n || ' 개. 해당 테이블은 Data Pump 로 옮기십시오.');
+    :g_fail := :g_fail + 1;
   ELSE
     DBMS_OUTPUT.PUT_LINE('  LONG / LONG RAW 없음.');
   END IF;
@@ -5447,7 +6091,7 @@ PROMPT ========================================================================
 SELECT owner, table_name, COUNT(*) AS lob_cols
   FROM dba_tab_columns@${DL_LINK_NAME}
  WHERE data_type IN ('CLOB','NCLOB','BLOB')
-   AND owner IN (${DL_OWNER_IN})
+   AND owner IN (${DL_OWNER_IN})${DL_TABLE_FILTER_REMOTE}
  GROUP BY owner, table_name ORDER BY 3 DESC;
 
 PROMPT
@@ -5457,7 +6101,7 @@ PROMPT ========================================================================
 DECLARE n NUMBER; miss NUMBER := 0;
 BEGIN
   FOR r IN (SELECT owner, table_name FROM dba_tables@${DL_LINK_NAME}
-             WHERE owner IN (${DL_OWNER_IN})) LOOP
+             WHERE owner IN (${DL_OWNER_IN})${DL_TABLE_FILTER_REMOTE}) LOOP
     SELECT COUNT(*) INTO n FROM dba_tables
      WHERE owner = r.owner AND table_name = r.table_name;
     IF n = 0 THEN
@@ -5469,8 +6113,19 @@ BEGIN
     DBMS_OUTPUT.PUT_LINE('  ------------------------------------------------------');
     DBMS_OUTPUT.PUT_LINE('  [FAIL] ' || miss || ' 개 테이블이 로컬에 없습니다.');
     DBMS_OUTPUT.PUT_LINE('         impdp SQLFILE 로 DDL 을 먼저 적용하십시오.');
+    :g_fail := :g_fail + 1;
   ELSE
     DBMS_OUTPUT.PUT_LINE('  대상 테이블 전부 존재합니다.');
+  END IF;
+END;
+/
+
+PROMPT
+BEGIN
+  IF :g_fail = 0 THEN
+    DBMS_OUTPUT.PUT_LINE('  RESULT: PASS  (DB Link 복사 사전 점검 통과)');
+  ELSE
+    DBMS_OUTPUT.PUT_LINE('  RESULT: FAIL  (' || :g_fail || ' 개 항목 실패 - 위 [FAIL] 참조)');
   END IF;
 END;
 /
@@ -5495,11 +6150,16 @@ EOF
 --         같은 테이블에 동시에 넣으면 서로 막힙니다. 일반 경로로 넣습니다.
 -- ==============================================================================
 SET SERVEROUTPUT ON SIZE UNLIMITED FEEDBACK ON
+SET DEFINE OFF
 WHENEVER SQLERROR CONTINUE
 SPOOL dblink_1_copy_${UNIQUE_ID}.log
 
 ${PDB_SWITCH_SQL}
+${DL_SCN_HDR}
 
+-- [FIX v09.04.03] (B6) 테이블마다 예외를 잡아 다음 테이블로 넘어가고, 끝에서 실패 건수로
+--   ORA-20911 을 낸다. 예전에는 한 테이블의 오류(증분 조건 컬럼 없음 등)가 블록 전체를
+--   끝내 뒤 테이블이 복사되지 않았고, 청크 작업이 FINISHED 가 아니어도 실패로 세지 않았다.
 -- [v09.03.02] (B18) 청크 경계 / NULL / 컬럼 순서
 --   - 예전에는 NTILE 을 원본 행 위에 바로 걸어, 같은 값이 두 그룹에 걸치면 구간이 겹쳐
 --     (BETWEEN) 그 값의 행이 두 번 복사되었다. 고유값(DISTINCT) 위에서 나눠 구간이
@@ -5515,12 +6175,17 @@ DECLARE
   v_st    NUMBER;
   v_null  NUMBER;
   v_dtype VARCHAR2(128);
+  v_ok    NUMBER := 0;
+  v_ng    NUMBER := 0;
+  v_asof  VARCHAR2(60) := CASE WHEN :g_scn IS NOT NULL THEN ' AS OF SCN ' || TO_CHAR(:g_scn) END;
 BEGIN
+  IF v_asof IS NOT NULL THEN DBMS_OUTPUT.PUT_LINE('>> 원격 읽기 시점:' || v_asof); END IF;
   FOR t IN (SELECT owner, table_name FROM dba_tables
              WHERE owner IN (${DL_OWNER_IN})
                AND table_name IN (${DL_TABLE_IN})
              ORDER BY owner, table_name) LOOP
-
+   BEGIN
+    v_task := NULL;
     v_cols := NULL;
     FOR c IN (SELECT column_name FROM dba_tab_cols
                WHERE owner = t.owner AND table_name = t.table_name
@@ -5539,12 +6204,13 @@ BEGIN
     END;
     IF v_dtype NOT IN ('NUMBER', 'FLOAT', 'INTEGER', 'BINARY_FLOAT', 'BINARY_DOUBLE') THEN
       EXECUTE IMMEDIATE 'INSERT INTO "' || t.owner || '"."' || t.table_name || '" (' || v_cols || ') '
-                     || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
+                     || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}' || v_asof
                      || ' WHERE 1 = 1${DL_WHERE_EXTRA}';
       v_null := SQL%ROWCOUNT;
       COMMIT;
       DBMS_OUTPUT.PUT_LINE(RPAD(t.owner || '.' || t.table_name, 50) || ' : OK (' || v_null
         || ' rows, single session - ${DL_CHUNK_COL} type=' || v_dtype || ' is not NUMBER)');
+      v_ok := v_ok + 1;
       CONTINUE;
     END IF;
 
@@ -5556,13 +6222,13 @@ BEGIN
     v_chunk := 'SELECT MIN(c) AS start_id, MAX(c) AS end_id FROM ('
             || '  SELECT c, NTILE(${DL_CHUNKS}) OVER (ORDER BY c) g FROM ('
             || '    SELECT DISTINCT ${DL_CHUNK_COL} c'
-            || '      FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
+            || '      FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}' || v_asof
             || '     WHERE ${DL_CHUNK_COL} IS NOT NULL'
             || '  )) GROUP BY g';
     DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_SQL(v_task, v_chunk, false);
 
     v_sql := 'INSERT INTO "' || t.owner || '"."' || t.table_name || '" (' || v_cols || ') '
-          || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
+          || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}' || v_asof
           || ' WHERE ${DL_CHUNK_COL} BETWEEN :start_id AND :end_id${DL_WHERE_EXTRA}';
 
     DBMS_PARALLEL_EXECUTE.RUN_TASK(v_task, v_sql, DBMS_SQL.NATIVE,
@@ -5574,7 +6240,7 @@ BEGIN
     v_null := 0;
     IF v_st = DBMS_PARALLEL_EXECUTE.FINISHED THEN
       EXECUTE IMMEDIATE 'INSERT INTO "' || t.owner || '"."' || t.table_name || '" (' || v_cols || ') '
-                     || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
+                     || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}' || v_asof
                      || ' WHERE ${DL_CHUNK_COL} IS NULL${DL_WHERE_EXTRA}';
       v_null := SQL%ROWCOUNT;
       COMMIT;
@@ -5582,9 +6248,28 @@ BEGIN
 
     DBMS_OUTPUT.PUT_LINE(RPAD(t.owner || '.' || t.table_name, 50) ||
       CASE v_st WHEN DBMS_PARALLEL_EXECUTE.FINISHED THEN ' : OK (+' || v_null || ' rows with NULL ${DL_CHUNK_COL})'
-                ELSE ' : *** status=' || v_st || ' (user_parallel_execute_chunks 확인)' END);
+                ELSE ' : *** status=' || v_st || ' (task ' || v_task || ' - user_parallel_execute_chunks 확인)' END);
     COMMIT;
+    IF v_st = DBMS_PARALLEL_EXECUTE.FINISHED THEN
+      v_ok := v_ok + 1;
+      BEGIN DBMS_PARALLEL_EXECUTE.DROP_TASK(v_task); EXCEPTION WHEN OTHERS THEN NULL; END;
+    ELSE
+      -- 실패 청크 확인용으로 작업은 남긴다. 재실행 전 대상 테이블을 비우십시오.
+      v_ng := v_ng + 1;
+    END IF;
+   EXCEPTION WHEN OTHERS THEN
+    ROLLBACK;
+    DBMS_OUTPUT.PUT_LINE(RPAD(t.owner || '.' || t.table_name, 50) ||
+                         ' : *** ' || SUBSTR(SQLERRM,1,120));
+    v_ng := v_ng + 1;
+   END;
   END LOOP;
+
+  DBMS_OUTPUT.PUT_LINE('  ------------------------------------------------------');
+  DBMS_OUTPUT.PUT_LINE('  성공 ' || v_ok || ' / 실패 ' || v_ng);
+  IF v_ng > 0 THEN
+    RAISE_APPLICATION_ERROR(-20911, 'DB Link 복사 실패 ' || v_ng || ' 건');
+  END IF;
 END;
 /
 
@@ -5602,10 +6287,12 @@ EOF
 --  각 테이블마다 COMMIT 하므로 중간에 멈춰도 완료된 테이블은 유지됩니다.
 -- ==============================================================================
 SET SERVEROUTPUT ON SIZE UNLIMITED FEEDBACK ON
+SET DEFINE OFF
 WHENEVER SQLERROR CONTINUE
 SPOOL dblink_1_copy_${UNIQUE_ID}.log
 
 ${PDB_SWITCH_SQL}
+${DL_SCN_HDR}
 ALTER SESSION ENABLE PARALLEL DML;
 
 DECLARE
@@ -5614,7 +6301,9 @@ DECLARE
   v_n    NUMBER;
   v_ok  NUMBER := 0;
   v_ng  NUMBER := 0;
+  v_asof VARCHAR2(60) := CASE WHEN :g_scn IS NOT NULL THEN ' AS OF SCN ' || TO_CHAR(:g_scn) END;
 BEGIN
+  IF v_asof IS NOT NULL THEN DBMS_OUTPUT.PUT_LINE('>> 원격 읽기 시점:' || v_asof); END IF;
   FOR t IN (SELECT owner, table_name FROM dba_tables
              WHERE owner IN (${DL_OWNER_IN})
                AND table_name IN (${DL_TABLE_IN})
@@ -5629,7 +6318,7 @@ BEGIN
         v_cols := v_cols || CASE WHEN v_cols IS NOT NULL THEN ',' END || '"' || c.column_name || '"';
       END LOOP;
       v_sql := 'INSERT ${_dl_hint}INTO "' || t.owner || '"."' || t.table_name || '" (' || v_cols || ') '
-            || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
+            || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}' || v_asof
             || '${DL_WHERE_CLAUSE}';
       EXECUTE IMMEDIATE v_sql;
       v_n := SQL%ROWCOUNT;
@@ -5666,14 +6355,18 @@ EOF
 --  값까지 확인하려면 메뉴 7-4 HASH VERIFY 를 사용하십시오.
 -- ==============================================================================
 SET SERVEROUTPUT ON SIZE UNLIMITED LINESIZE 200 FEEDBACK OFF
+SET DEFINE OFF
 WHENEVER SQLERROR CONTINUE
 SPOOL dblink_9_verify_${UNIQUE_ID}.log
 
 ${PDB_SWITCH_SQL}
+${DL_SCN_HDR}
 
 DECLARE
   v_r NUMBER; v_l NUMBER; v_bad NUMBER := 0; v_tot NUMBER := 0;
+  v_asof VARCHAR2(60) := CASE WHEN :g_scn IS NOT NULL THEN ' AS OF SCN ' || TO_CHAR(:g_scn) END;
 BEGIN
+  IF v_asof IS NOT NULL THEN DBMS_OUTPUT.PUT_LINE('>> 원격 건수 기준 시점:' || v_asof); END IF;
   DBMS_OUTPUT.PUT_LINE(RPAD('TABLE',46) || RPAD('REMOTE',14) || RPAD('LOCAL',14) || 'STATUS');
   DBMS_OUTPUT.PUT_LINE(RPAD('-',86,'-'));
   FOR t IN (SELECT owner, table_name FROM dba_tables
@@ -5683,7 +6376,7 @@ BEGIN
     v_tot := v_tot + 1;
     BEGIN
       EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM "' || t.owner || '"."' || t.table_name ||
-                        '"@${DL_LINK_NAME}${DL_WHERE_CLAUSE}' INTO v_r;
+                        '"@${DL_LINK_NAME}' || v_asof || '${DL_WHERE_CLAUSE}' INTO v_r;
       EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM "' || t.owner || '"."' || t.table_name ||
                         '"${DL_WHERE_CLAUSE}' INTO v_l;
       DBMS_OUTPUT.PUT_LINE(RPAD(t.owner || '.' || t.table_name, 46) ||
@@ -5708,11 +6401,16 @@ SPOOL OFF
 EXIT;
 EOF
 
-    for _pair in "$DL_COPY_SH:$DL_COPY_SQL:DB Link 데이터 복사" \
-                 "$DL_VERIFY_SH:$DL_VERIFY_SQL:DB Link 복사 결과 건수 대조"; do
+    # [FIX v09.04.03] (B6) 사전 점검도 래퍼를 만들고, 세 래퍼 모두 결과를 종료코드로 낸다.
+    #   예전에는 sqlplus 뒤 "완료." 만 찍어 실패해도 0 이었다.
+    for _pair in "$DL_PRE_SH:$DL_PRE_SQL:DB Link 복사 사전 점검:verdict" \
+                 "$DL_COPY_SH:$DL_COPY_SQL:DB Link 데이터 복사:sql" \
+                 "$DL_VERIFY_SH:$DL_VERIFY_SQL:DB Link 복사 결과 건수 대조:verdict"; do
         _sh=$(echo "$_pair" | cut -d: -f1)
         _sq=$(echo "$_pair" | cut -d: -f2)
         _ti=$(echo "$_pair" | cut -d: -f3)
+        _ck=$(echo "$_pair" | cut -d: -f4)
+        _lg="${_sq%.sql}.log"
         cat <<EOF > "$_sh"
 #!/bin/bash
 cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
@@ -5721,14 +6419,45 @@ export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 echo ">> ${_ti} 를 실행합니다..."
+EOF
+        if [ "$_ck" = "sql" ] && [ "$DL_ASOF_MODE" = "CAPTURE" ]; then
+            cat <<EOF >> "$_sh"
+# [v09.04.03] (기능) 원격 DB 의 현재 SCN 을 캡처해 복사와 검증이 같은 시점을 읽게 한다.
+_scn_out=\$(sqlplus -S /nolog <<SCN_EOF
+connect $(hd_esc "$DB_CONN")
+SET HEAD OFF FEEDBACK OFF PAGES 0
+$(hd_esc "$PDB_SWITCH_SQL")
+SELECT 'VAL:' || current_scn FROM v\\\$database@${DL_LINK_NAME};
+EXIT;
+SCN_EOF
+)
+_scn=\$(echo "\$_scn_out" | sed -n 's/^VAL://p' | tr -dc '0-9')
+if [ -z "\$_scn" ]; then
+    echo ">> [실패] 원격 SCN 을 캡처하지 못했습니다 (v\\\$database@${DL_LINK_NAME} 권한 / 링크 확인)."
+    exit 1
+fi
+echo "EXEC :g_scn := \$_scn" > "${DL_SCN_SQL}"
+echo ">> 원격 읽기 시점 SCN = \$_scn (${DL_SCN_SQL})"
+EOF
+        fi
+        cat <<EOF >> "$_sh"
 sqlplus -S /nolog <<CONNECT_EOF
 connect $(hd_esc "$DB_CONN")
 @${_sq}
 CONNECT_EOF
-echo ">> 완료."
 EOF
+        if [ "$_ck" = "verdict" ]; then
+            emit_verdict_check "$_sh" "$_lg" "$_ti"
+        else
+            emit_sql_result_check "$_sh" "$_lg" "" "$_ti"
+        fi
         chmod 700 "$_sh"
     done
+
+    # [FIX v09.04.03] (B6) 사전 점검 -> 복사 -> 검증을 체크포인트 러너로 묶는다.
+    #   점검이 FAIL 이면 복사로 넘어가지 않는다. 복사 스텝은 적재 스텝이라 도중 실패 후
+    #   --resume 시 중복 적재 보호(--force-rerun 필요)가 걸린다.
+    generate_master_runner_script "DB Link Copy Pipeline" "$DL_PRE_SH $DL_COPY_SH $DL_VERIFY_SH"
     return 0
 }
 
@@ -5768,11 +6497,15 @@ run_dblink_copy_mode() {
     else printf "  대상 테이블을 지정하세요 (쉼표 구분, 스키마 전체는 엔터): "; fi
     _read dl_tables
     dl_tables=$(normalize_list "$dl_tables")
+    # [FIX v09.04.03] (B6) 사전 점검은 원격(@링크) 딕셔너리를 보므로 로컬 서브쿼리를
+    #   쓸 수 없다 (로컬에 없는 테이블이 걸러져 "누락" 을 못 찾았다). 원격용 필터를 따로 둔다.
     if [ -z "$dl_tables" ]; then
         DL_TABLE_IN="SELECT table_name FROM dba_tables WHERE owner IN (${DL_OWNER_IN})"
+        DL_TABLE_FILTER_REMOTE=""
         _dl_scope="스키마 전체"
     else
         DL_TABLE_IN=$(sql_in_list "$dl_tables")
+        DL_TABLE_FILTER_REMOTE=" AND table_name IN (${DL_TABLE_IN})"
         _dl_scope="지정 테이블 ${dl_tables}"
     fi
 
@@ -5804,6 +6537,34 @@ run_dblink_copy_mode() {
             echo "            해당 컬럼이 없는 테이블은 실패로 기록됩니다."
         fi
     fi
+
+    # ------------------------------------------------------------------
+    # [v09.04.03] (기능) 원격 읽기 시점 고정 (AS OF SCN)
+    #   운영 중인 Source 를 읽으면 테이블마다(청크마다) 읽는 시점이 달라 부모/자식이 어긋난다.
+    #   한 SCN 으로 읽으면 복사와 검증(건수 대조)이 같은 시점을 본다. Source UNDO 보존 시간이
+    #   복사 시간보다 짧으면 ORA-01555 가 날 수 있다.
+    # ------------------------------------------------------------------
+    echo "----------------------------------------------------------------------"
+    echo "  [읽기 시점 (AS OF SCN)]"
+    echo "   1) 사용 안 함 (테이블마다 실행 시점)"
+    echo "   2) 복사 시작 시 원격 DB 의 현재 SCN 을 캡처해 모든 테이블에 적용 (권장)"
+    echo "   3) SCN 직접 입력"
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Select (1-3) [Default: 1]: "
+    else printf "  선택 (1-3) [기본값: 1]: "; fi
+    _read dl_scn_opt
+    DL_ASOF_MODE=""; DL_ASOF_SCN=""
+    case "$dl_scn_opt" in
+        2) DL_ASOF_MODE="CAPTURE" ;;
+        3)
+            printf "  SCN: "
+            _read dl_scn_val
+            if echo "$dl_scn_val" | grep -qE '^[0-9]+$'; then
+                DL_ASOF_MODE="FIXED"; DL_ASOF_SCN="$dl_scn_val"
+            else
+                echo "  [오류] SCN 은 숫자여야 합니다: '${dl_scn_val}'"
+                return 1
+            fi ;;
+    esac
 
     # ------------------------------------------------------------------
     # 병렬 방식
@@ -5864,15 +6625,40 @@ run_dblink_copy_mode() {
     else
         echo "  적재 방식   : 단일 세션 INSERT /*+ APPEND */"
     fi
-    [ -n "$DL_WHERE_CLAUSE" ] && echo "  증분 조건   :${DL_WHERE_CLAUSE}"
+    [ -n "$DL_WHERE_CLAUSE" ] && echo "  증분 조건   : WHERE ${dl_where}"
+    case "$DL_ASOF_MODE" in
+        CAPTURE) echo "  읽기 시점   : AS OF SCN (복사 시작 시 캡처 -> ${DL_SCN_SQL})" ;;
+        FIXED)   echo "  읽기 시점   : AS OF SCN ${DL_ASOF_SCN}" ;;
+    esac
     echo "----------------------------------------------------------------------"
     echo "  [실행 순서]"
-    echo "   1) sqlplus <conn> @${DL_PRE_SQL}      (사전 점검 - 반드시 먼저)"
+    echo "   1) bash ${DL_PRE_SH}      (사전 점검 - 반드시 먼저, FAIL 이면 exit 1)"
     echo "   2) impdp SQLFILE 로 DDL 적용          (대상 테이블이 없다면)"
     echo "   3) bash ${DL_COPY_SH}"
     echo "   4) bash ${DL_VERIFY_SH}"
     echo "   5) 메뉴 7-4 HASH VERIFY 로 값까지 대조 (권장)"
+    echo "   * 1/3/4 를 한 번에: bash ${MASTER_RUNNER_SH} (-y 무인, --resume 재개)"
     echo "======================================================================"
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.04.03] (B4) REMAP_TABLESPACE 마법사용 Source 테이블스페이스 목록
+#   NETWORK_LINK : DB Link 너머 Source 딕셔너리
+#   DUMP         : Source 가 남긴 매니페스트의 TABLESPACES=
+#   둘 다 없으면 빈 값 (호출부가 직접 입력을 받는다). 예전에는 Target 딕셔너리를 읽었고,
+#   조회가 비면 가짜 목록(TS_DATA, TS_APP_DATA ...)으로 매핑을 만들었다.
+# ------------------------------------------------------------------------------
+source_tablespace_list() {
+    if [ "$MOCK_MODE" = "true" ]; then echo "TS_DATA TS_APP_DATA TS_INDEX"; return 0; fi
+    if [ "$IMPORT_METHOD" = "NETWORK_LINK" ] && [ -n "$DBLINK_NAME" ]; then
+        sql_query "SELECT DISTINCT 'VAL:' || tablespace_name FROM dba_segments@${DBLINK_NAME}
+ WHERE tablespace_name NOT IN ('SYSTEM','SYSAUX') AND $(ora_internal_excl "owner" "@${DBLINK_NAME}" 0);" \
+            | sed -n 's/^[[:space:]]*VAL://p' | tr '\n' ' '
+        return 0
+    fi
+    _stl_mf=$(manifest_path)
+    [ -n "$_stl_mf" ] && sed -n 's/^TABLESPACES=//p' "$_stl_mf" | head -n 1 | tr ',' ' '
     return 0
 }
 
@@ -6008,7 +6794,7 @@ run_target_mode() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
     calculate_parallel_degree
 
     echo "----------------------------------------------------------------------"
@@ -6070,7 +6856,7 @@ run_target_mode() {
 
         if [ "$MOCK_MODE" != "true" ]; then
             # [FIX v09.03.02] (B11/B15) 공통 함수로 확인. 조회 실패면 추측하지 않고 멈춘다.
-            link_cnt=$(dblink_count "$DBLINK_NAME")
+            link_cnt=$(dblink_count "$DBLINK_NAME" dp)
             if [ -z "$link_cnt" ]; then
                 if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] Could not check whether DB Link '$DBLINK_NAME' exists (connection / privilege)."
                 else echo "  [오류] DB Link '$DBLINK_NAME' 존재 여부를 확인하지 못했습니다 (접속/권한 확인)."; fi
@@ -6085,7 +6871,7 @@ run_target_mode() {
                 printf "  - Source DB TNS Alias or IP:PORT/SERVICE_NAME: "; _read src_tns
 
                 # [v09.02] 위와 동일한 공통 경로를 쓴다 (복붙 제거).
-                if ! create_dblink_live "$DBLINK_NAME" "$src_user" "$src_pwd" "$src_tns"; then
+                if ! create_dblink_live "$DBLINK_NAME" "$src_user" "$src_pwd" "$src_tns" dp; then
                     if [ "$LANG_PREF" = "EN" ]; then
                         echo "  >> NETWORK_LINK import cannot proceed without the DB Link."
                     else
@@ -6130,7 +6916,7 @@ run_target_mode() {
     else echo "  [사전 충돌 검증 및 대상 목록 선택]"; fi
     
     if [ "$IMPORT_METHOD" = "DUMP" ]; then
-        DUMP_FILES=$(ls "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}*.dmp 2>/dev/null)
+        DUMP_FILES=$(ls "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}_*.dmp 2>/dev/null)
         DUMP_EXISTS=$(echo "$DUMP_FILES" | grep -c "\.dmp$")
         if [ "$DUMP_EXISTS" -eq 0 ]; then
             if [ "$LANG_PREF" = "EN" ]; then
@@ -6145,7 +6931,7 @@ run_target_mode() {
         else
             if [ "$LANG_PREF" = "EN" ]; then echo "  >> Dump files verified ($DUMP_EXISTS detected)"
             else echo "  >> Dump 파일 확인 완료 ($DUMP_EXISTS 개 감지)"; fi
-            ls -1 "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}*.dmp 2>/dev/null | while read -r df; do
+            ls -1 "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}_*.dmp 2>/dev/null | while read -r df; do
                 echo "     - $(basename "$df")"
             done
         fi
@@ -6202,7 +6988,7 @@ run_target_mode() {
             #   목록을 개행 구분 파일에 담고 한 건씩 처리해 공백에 영향받지 않게 한다.
             LOG_LIST_FILE="$(tmpf log_list.tmp)"
             : > "$LOG_LIST_FILE"
-            for _lf in "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}*expdp*.log; do
+            for _lf in "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}_expdp_*.log; do
                 [ -e "$_lf" ] || continue
                 case "$_lf" in
                     *_meta_custom*|*_estimate_*|*_stats_*) continue ;;
@@ -6502,6 +7288,26 @@ EOF
                             echo "  [오류] 새 이름 형식이 올바르지 않습니다: '${new_name}'"
                             return 1
                         fi
+                        # [v09.04.03] (개선9) 바꾼 이름도 Target 에 이미 있으면 같은 충돌이 다시 난다.
+                        if [ "$MOCK_MODE" != "true" ]; then
+                            _rn_own=$(echo "$itm" | cut -d'.' -f1)
+                            _rn_own=$(remap_lookup REMAP_SCHEMA "$_rn_own")
+                            case "$MIG_TYPE" in
+                                SCHEMA)     _rn_q="SELECT 'VAL:' || COUNT(*) FROM dba_users WHERE username = '${new_name}';" ;;
+                                TABLESPACE) _rn_q="SELECT 'VAL:' || COUNT(*) FROM dba_tablespaces WHERE tablespace_name = '${new_name}';" ;;
+                                TABLE)      _rn_q="SELECT 'VAL:' || COUNT(*) FROM dba_tables WHERE owner = '$(echo "$_rn_own" | sed "s/'/''/g")' AND table_name = '${new_name}';" ;;
+                                *)          _rn_q="" ;;
+                            esac
+                            if [ -n "$_rn_q" ]; then
+                                _rn_cnt=$(sql_query_num "$_rn_q")
+                                if [ -z "$_rn_cnt" ]; then
+                                    echo "  [경고] 새 이름 '${new_name}' 의 Target 존재 여부를 확인하지 못했습니다 (접속/권한)."
+                                elif [ "$_rn_cnt" -gt 0 ]; then
+                                    echo "  [오류] 새 이름 '${new_name}' 도 Target 에 이미 있습니다. 다른 이름을 쓰거나 2) 를 고르십시오."
+                                    return 1
+                                fi
+                            fi
+                        fi
                         if [ "$MIG_TYPE" = "SCHEMA" ]; then REMAP_PARAMS="$REMAP_PARAMS REMAP_SCHEMA=${itm}:${new_name}"
                         elif [ "$MIG_TYPE" = "TABLESPACE" ]; then REMAP_PARAMS="$REMAP_PARAMS REMAP_TABLESPACE=${itm}:${new_name}"
                         elif [ "$MIG_TYPE" = "TABLE" ]; then REMAP_PARAMS="$REMAP_PARAMS REMAP_TABLE=${itm}:${new_name}"
@@ -6586,19 +7392,11 @@ EOF
                 tgt_unified_ts=$(echo "$tgt_unified_ts" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
                 
                 # 소스 테이블스페이스 목록 수집
-                _src_ts_list=""
-                if [ "$MOCK_MODE" = "true" ]; then
-                    _src_ts_list="TS_DATA TS_APP_DATA TS_INDEX"
-                else
-                    _src_ts_list=$(sqlplus -S /nolog <<SQL_EOF 2>/dev/null | tr -d ' ' | sed '/^$/d' | grep -vE 'ORA-|SP2-|TABLESPACE'
-connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0
-$PDB_SWITCH_SQL
-SELECT DISTINCT tablespace_name FROM dba_segments${DBLINK_SUFFIX} WHERE tablespace_name NOT IN ('SYSTEM','SYSAUX','TEMP','UNDOTBS1','UNDOTBS2');
-EXIT;
-SQL_EOF
-)
-                    [ -z "$_src_ts_list" ] && _src_ts_list="TS_DATA TS_APP_DATA TS_INDEX"
+                _src_ts_list=$(source_tablespace_list)
+                if [ -z "$(echo "$_src_ts_list" | tr -d ' ')" ]; then
+                    printf "  Source 테이블스페이스 목록을 찾지 못했습니다. 직접 입력 (공백/쉼표 구분): "
+                    _read src_ts_manual
+                    _src_ts_list=$(normalize_list "$src_ts_manual" | tr ',' ' ' | tr '[:lower:]' '[:upper:]')
                 fi
                 for _sts in $_src_ts_list; do
                     if [ "$_sts" != "$tgt_unified_ts" ]; then
@@ -6617,17 +7415,11 @@ SQL_EOF
                 _read tgt_idx_ts; [ -z "$tgt_idx_ts" ] && tgt_idx_ts="TS_INDEX"
                 tgt_idx_ts=$(echo "$tgt_idx_ts" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
                 
-                _src_ts_list="TS_DATA TS_DATA01 TS_DATA02 TS_IDX TS_INDEX01 TS_APP_LOB"
-                if [ "$MOCK_MODE" != "true" ]; then
-                    _db_ts_list=$(sqlplus -S /nolog <<SQL_EOF 2>/dev/null | tr -d ' ' | sed '/^$/d' | grep -vE 'ORA-|SP2-|TABLESPACE'
-connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0
-$PDB_SWITCH_SQL
-SELECT DISTINCT tablespace_name FROM dba_segments${DBLINK_SUFFIX} WHERE tablespace_name NOT IN ('SYSTEM','SYSAUX','TEMP','UNDOTBS1','UNDOTBS2');
-EXIT;
-SQL_EOF
-)
-                    [ -n "$_db_ts_list" ] && _src_ts_list="$_db_ts_list"
+                _src_ts_list=$(source_tablespace_list)
+                if [ -z "$(echo "$_src_ts_list" | tr -d ' ')" ]; then
+                    printf "  Source 테이블스페이스 목록을 찾지 못했습니다. 직접 입력 (공백/쉼표 구분): "
+                    _read src_ts_manual
+                    _src_ts_list=$(normalize_list "$src_ts_manual" | tr ',' ' ' | tr '[:lower:]' '[:upper:]')
                 fi
                 for _sts in $_src_ts_list; do
                     if echo "$_sts" | grep -qiE "IDX|INDEX"; then
@@ -6678,7 +7470,7 @@ SQL_EOF
         IMP_DUMPFILES=""
         PREFIXES=""
         if [ "$DUMP_EXISTS" -gt 0 ]; then
-            PREFIXES=$(ls -1 "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}*.dmp 2>/dev/null | sed 's/_[0-9][0-9]*\.dmp$/_%U.dmp/' | awk -F'/' '{print $NF}' | sort | uniq | grep -v '_meta_custom' | grep -v '_stats_')
+            PREFIXES=$(ls -1 "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}_*.dmp 2>/dev/null | sed 's/_[0-9][0-9]*\.dmp$/_%U.dmp/' | awk -F'/' '{print $NF}' | sort | uniq | grep -v '_meta_custom' | grep -v '_stats_')
             for pfx in $PREFIXES; do
                 [ -n "$IMP_DUMPFILES" ] && IMP_DUMPFILES="$IMP_DUMPFILES,"
                 IMP_DUMPFILES="$IMP_DUMPFILES$pfx"
@@ -6741,7 +7533,7 @@ SQL_EOF
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
 #   커맨드라인에 두면 같은 서버의 다른 OS 계정이 ps -ef 로 패스워드를
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
-USERID="$IMPDP_USERID_STR"
+$(par_userid "$IMPDP_USERID_STR")
 DIRECTORY=$DIR_OBJ_NAME
 $DDL_SOURCE_PARAM
 LOGFILE=${UNIQUE_ID}_impdp_ddl_extract.log
@@ -6806,6 +7598,34 @@ EOF
     fi
     _read workflow_opt
     [ -z "$workflow_opt" ] && workflow_opt="2"
+
+    # ------------------------------------------------------------------
+    # [v09.04.03] (기능) impdp TRANSFORM 옵션
+    #   DISABLE_ARCHIVE_LOGGING:Y (12c+) : 적재/인덱스 생성의 redo 를 줄여 시간과 아카이브 로그를
+    #     크게 줄인다. 대신 그 구간은 복구 불가(NOLOGGING)이므로 이관 직후 백업이 필요하다.
+    #     DB 가 FORCE LOGGING(Data Guard 등)이면 Oracle 이 무시한다.
+    #   LOB_STORAGE:SECUREFILE (12c+) : BASICFILE LOB 을 SECUREFILE 로 바꿔 만든다.
+    # ------------------------------------------------------------------
+    IMP_TRANSFORM_LINES=""
+    _tv_major=$(echo "$DB_VERSION" | sed 's/[^0-9].*//')
+    if [ "$(to_num "$_tv_major")" -ge 12 ]; then
+        echo "----------------------------------------------------------------------"
+        if [ "$LANG_PREF" = "EN" ]; then printf "  impdp TRANSFORM=DISABLE_ARCHIVE_LOGGING:Y (less redo; take a backup right after)? (y/N) [Default: N]: "
+        else printf "  impdp 아카이브 로그 최소화 TRANSFORM=DISABLE_ARCHIVE_LOGGING:Y 사용 (이관 직후 백업 필요)? (y/N) [기본값: N]: "; fi
+        _read tr_noarch_opt
+        if [ "$tr_noarch_opt" = "y" ] || [ "$tr_noarch_opt" = "Y" ]; then
+            IMP_TRANSFORM_LINES="TRANSFORM=DISABLE_ARCHIVE_LOGGING:Y"
+            echo "  >> 적용. [주의] FORCE LOGGING DB(Data Guard 등)에서는 무시되며, 적용되면 이관 직후 RMAN 백업을 받으십시오."
+        fi
+        if [ "$LANG_PREF" = "EN" ]; then printf "  Convert LOBs to SECUREFILE (TRANSFORM=LOB_STORAGE:SECUREFILE)? (y/N) [Default: N]: "
+        else printf "  LOB 을 SECUREFILE 로 변환 생성 (TRANSFORM=LOB_STORAGE:SECUREFILE)? (y/N) [기본값: N]: "; fi
+        _read tr_lob_opt
+        if [ "$tr_lob_opt" = "y" ] || [ "$tr_lob_opt" = "Y" ]; then
+            IMP_TRANSFORM_LINES="${IMP_TRANSFORM_LINES:+${IMP_TRANSFORM_LINES}
+}TRANSFORM=LOB_STORAGE:SECUREFILE"
+            echo "  >> 적용: LOB_STORAGE:SECUREFILE"
+        fi
+    fi
 
     # ------------------------------------------------------------------
     # [FIX v09.03.01] (B2) 단계별 분할 복구의 TABLE_EXISTS_ACTION 매핑
@@ -6884,7 +7704,7 @@ EOF
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
 #   커맨드라인에 두면 같은 서버의 다른 OS 계정이 ps -ef 로 패스워드를
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
-USERID="$IMPDP_USERID_STR"
+$(par_userid "$IMPDP_USERID_STR")
 DIRECTORY=$DIR_OBJ_NAME
 LOGFILE=${UNIQUE_ID}_impdp_p1_table${_ds_tag}.log
 $_ds_mig
@@ -6913,6 +7733,7 @@ EOF
         # [FIX v09.03.01] (B2) 단계별 매핑값을 쓴다 (위 매핑표 참조)
         if [ -n "$TEA_P1_PARAM" ]; then echo "$TEA_P1_PARAM" >> "$IMP_P1_PAR"; fi
         if [ -n "$TDE_PARAM" ]; then echo "$TDE_PARAM" >> "$IMP_P1_PAR"; fi
+        if [ -n "$IMP_TRANSFORM_LINES" ]; then echo "$IMP_TRANSFORM_LINES" >> "$IMP_P1_PAR"; fi   # [v09.04.03]
 
         cat <<EOF > "$IMP_P1"
 #!/bin/bash
@@ -6957,7 +7778,14 @@ DS_EOF
         #     - 실패는 건수로 집계해 보고하고 종료코드를 비0 으로 만든다.
         # ------------------------------------------------------------------
         _uid_sql=$(echo "$UNIQUE_ID" | sed "s/'/''/g")
-        _fk_scope=$(mig_scope_pred "owner" "table_name")
+        # [FIX v09.04.03] (B15) 범위 밖 자식 테이블이 범위 안 부모(PK/UK)를 참조하는 FK 도 끈다.
+        #   예전에는 이관 대상 테이블에 걸린 FK 만 봤다. 부모 테이블을 TRUNCATE / REPLACE 로
+        #   적재하면 범위 밖 자식의 FK 때문에 ORA-02266 / ORA-02449 로 실패했다.
+        _fk_scope="( $(mig_scope_pred "owner" "table_name")
+             OR (r_owner, r_constraint_name) IN (
+                  SELECT p.owner, p.constraint_name FROM dba_constraints p
+                   WHERE p.constraint_type IN ('P', 'U')
+                     AND $(mig_scope_pred "p.owner" "p.table_name")) )"
         _trg_scope=$(mig_scope_pred "table_owner" "table_name")
         _pdb_prompt_line=""
         [ -n "$PDB_SWITCH_SQL" ] && _pdb_prompt_line="PROMPT $PDB_SWITCH_SQL"
@@ -7080,7 +7908,7 @@ EOF
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
 #   커맨드라인에 두면 같은 서버의 다른 OS 계정이 ps -ef 로 패스워드를
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
-USERID="$IMPDP_USERID_STR"
+$(par_userid "$IMPDP_USERID_STR")
 DIRECTORY=$DIR_OBJ_NAME
 LOGFILE=${UNIQUE_ID}_impdp_p2_data${_ds_tag}.log
 $_ds_mig
@@ -7109,6 +7937,7 @@ EOF
         # [FIX v09.03.01] (B2) 원래 선택값(SKIP 등)을 그대로 넣으면 데이터가 0건 적재된다.
         if [ -n "$TEA_P2_PARAM" ]; then echo "$TEA_P2_PARAM" >> "$IMP_P2_PAR"; fi
         if [ -n "$TDE_PARAM" ]; then echo "$TDE_PARAM" >> "$IMP_P2_PAR"; fi
+        if [ -n "$IMP_TRANSFORM_LINES" ]; then echo "$IMP_TRANSFORM_LINES" | grep -v LOB_STORAGE >> "$IMP_P2_PAR"; fi   # [v09.04.03]
 
         cat <<EOF > "$IMP_P2"
 #!/bin/bash
@@ -7254,7 +8083,7 @@ EOF
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
 #   커맨드라인에 두면 같은 서버의 다른 OS 계정이 ps -ef 로 패스워드를
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
-USERID="$IMPDP_USERID_STR"
+$(par_userid "$IMPDP_USERID_STR")
 DIRECTORY=$DIR_OBJ_NAME
 LOGFILE=${UNIQUE_ID}_impdp_p3_rest${_ds_tag}.log
 $_ds_mig
@@ -7274,6 +8103,7 @@ EOF
             echo "INCLUDE=INDEX,CONSTRAINT,REF_CONSTRAINT,TRIGGER" >> "$IMP_P3_PAR"
             if [ "$CALC_PARALLEL" -gt 0 ]; then echo "PARALLEL=$CALC_PARALLEL" >> "$IMP_P3_PAR"; fi
             if [ -n "$TDE_PARAM" ]; then echo "$TDE_PARAM" >> "$IMP_P3_PAR"; fi
+            if [ -n "$IMP_TRANSFORM_LINES" ]; then echo "$IMP_TRANSFORM_LINES" | grep -v LOB_STORAGE >> "$IMP_P3_PAR"; fi   # [v09.04.03]
 
             cat <<EOF > "$IMP_P3"
 #!/bin/bash
@@ -7307,7 +8137,7 @@ DS_EOF
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
 #   커맨드라인에 두면 같은 서버의 다른 OS 계정이 ps -ef 로 패스워드를
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
-USERID="$IMPDP_USERID_STR"
+$(par_userid "$IMPDP_USERID_STR")
 DIRECTORY=$DIR_OBJ_NAME
 LOGFILE=${UNIQUE_ID}_impdp_all${_ds_tag}.log
 $_ds_mig
@@ -7323,6 +8153,7 @@ EOF
         if [ "$CALC_PARALLEL" -gt 0 ]; then echo "PARALLEL=$CALC_PARALLEL" >> "$IMP_ALL_PAR"; fi
         if [ -n "$TABLE_EXISTS_ACTION_PARAM" ]; then echo "$TABLE_EXISTS_ACTION_PARAM" >> "$IMP_ALL_PAR"; fi
         if [ -n "$TDE_PARAM" ]; then echo "$TDE_PARAM" >> "$IMP_ALL_PAR"; fi
+        if [ -n "$IMP_TRANSFORM_LINES" ]; then echo "$IMP_TRANSFORM_LINES" >> "$IMP_ALL_PAR"; fi   # [v09.04.03]
 
         cat <<EOF > "$IMP_ALL"
 #!/bin/bash
@@ -7415,7 +8246,7 @@ EOF
 # [SEC v08.01] 접속 문자열을 커맨드라인이 아닌 PARFILE 에 둔다.
 #   커맨드라인에 두면 같은 서버의 다른 OS 계정이 ps -ef 로 패스워드를
 #   평문으로 볼 수 있다(CWE-214). 이 파일은 chmod 600 으로 보호된다.
-USERID="$IMPDP_USERID_STR"
+$(par_userid "$IMPDP_USERID_STR")
 DIRECTORY=$DIR_OBJ_NAME
 $STATS_DUMP_PARAM
 LOGFILE=${UNIQUE_ID}_impdp_stats.log
@@ -7788,7 +8619,16 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 DIR_PHYSICAL_PATH=$(sh_quote "$DIR_PHYSICAL_PATH")
 UNIQUE_ID=$(sh_quote "$UNIQUE_ID")
 IMPORT_METHOD=$(sh_quote "$IMPORT_METHOD")
+# [FIX v09.04.03] (B11) 로그 대조는 메뉴 6 / HTML 보고서와 같은 log_match_rows 를 쓴다.
+#   par 로 넘긴 REMAP 은 impdp 로그에 남지 않으므로 생성 시점의 REMAP 을 같이 넘긴다.
+VAL_REMAPS=$(sh_quote "$REMAP_PARAMS")
 _val_rc=0
+EOF
+        {
+            echo 'tmpf() { echo "./.val_${1}_$$.tmp"; }'
+            typeset -f log_match_rows
+        } >> "$VAL_SH"
+        cat <<EOF >> "$VAL_SH"
 
 echo ">> [1/3] Invalid Object 자동 재컴파일을 수행합니다 (utlrp.sql)..."
 sqlplus -S /nolog <<SQL_EOF
@@ -7858,33 +8698,16 @@ else
     echo "  --------------------------------------------------------------------------------------"
     
     mismatches=0; matches=0
-    while IFS=, read -r tbl exp_cnt; do
-        imp_cnt=\$(grep "^\${tbl}," \$imp_tmp | cut -d',' -f2)
-        if [ -z "\$imp_cnt" ]; then
-            tbl_only=\$(echo "\$tbl" | cut -d'.' -f2)
-            imp_match_line=\$(grep "\.\${tbl_only}," \$imp_tmp | head -n 1)
-            if [ -n "\$imp_match_line" ]; then
-                imp_cnt=\$(echo "\$imp_match_line" | cut -d',' -f2)
-                tbl_mapped=\$(echo "\$imp_match_line" | cut -d',' -f1)
-                tbl="\$tbl -> \$tbl_mapped"
-            fi
-        fi
-
-        if [ -z "\$imp_cnt" ]; then printf "  %-38s | %-12s | %-12s | \033[31m%-10s\033[0m\n" "\$tbl" "\$exp_cnt" "MISSING" "[누락]"; mismatches=\$((mismatches + 1))
-        elif [ "\$exp_cnt" = "\$imp_cnt" ]; then printf "  %-38s | %-12s | %-12s | \033[32m%-10s\033[0m\n" "\$tbl" "\$exp_cnt" "\$imp_cnt" "[일치]"; matches=\$((matches + 1))
-        else printf "  %-38s | %-12s | %-12s | \033[33m%-10s\033[0m\n" "\$tbl" "\$exp_cnt" "\$imp_cnt" "[불일치]"; mismatches=\$((mismatches + 1))
-        fi
-    done < \$exp_tmp
-
-    while IFS=, read -r tbl imp_cnt; do
-        if ! grep -q "^\${tbl}," \$exp_tmp; then
-            tbl_only=\$(echo "\$tbl" | cut -d'.' -f2)
-            if ! grep -q "\.\${tbl_only}," \$exp_tmp; then
-                printf "  %-38s | %-12s | %-12s | \033[36m%-10s\033[0m\n" "\$tbl" "N/A" "\$imp_cnt" "[추가됨]"
-                mismatches=\$((mismatches + 1))
-            fi
-        fi
-    done < \$imp_tmp
+    log_match_rows "\$exp_tmp" "\$imp_tmp" "\$(head -n 1 "\$imp_list")" "\$VAL_REMAPS" > "\${imp_tmp}.rows"
+    while IFS='|' read -r _lv_st tbl exp_cnt imp_cnt; do
+        case "\$_lv_st" in
+            MISSING)  printf "  %-38s | %-12s | %-12s | \033[31m%-10s\033[0m\n" "\$tbl" "\$exp_cnt" "MISSING" "[누락]"; mismatches=\$((mismatches + 1)) ;;
+            MATCH)    printf "  %-38s | %-12s | %-12s | \033[32m%-10s\033[0m\n" "\$tbl" "\$exp_cnt" "\$imp_cnt" "[일치]"; matches=\$((matches + 1)) ;;
+            MISMATCH) printf "  %-38s | %-12s | %-12s | \033[33m%-10s\033[0m\n" "\$tbl" "\$exp_cnt" "\$imp_cnt" "[불일치]"; mismatches=\$((mismatches + 1)) ;;
+            ADDED)    printf "  %-38s | %-12s | %-12s | \033[36m%-10s\033[0m\n" "\$tbl" "N/A" "\$imp_cnt" "[추가됨]"; mismatches=\$((mismatches + 1)) ;;
+        esac
+    done < "\${imp_tmp}.rows"
+    rm -f "\${imp_tmp}.rows"
 
     echo "  --------------------------------------------------------------------------------------"
     if [ \$mismatches -eq 0 ]; then
@@ -8555,6 +9378,21 @@ cs_check_note() {
 }
 
 # ------------------------------------------------------------------------------
+# [FIX v09.04.03] (B11) impdp 로그 이름(<UID>_impdp_*.log)에서 Job ID 를 얻어, 현재
+#   디렉토리의 같은 Job par 파일에 적힌 REMAP_SCHEMA / REMAP_TABLE 토큰을 모은다.
+#   메뉴 6(로그 검증) / HTML 보고서처럼 생성 시점의 REMAP_PARAMS 가 없는 경로용.
+# ------------------------------------------------------------------------------
+remap_tokens_for_log() {
+    _rt_uid=$(basename "$1" 2>/dev/null | sed -n 's/_impdp_.*$//p')
+    if [ -n "$_rt_uid" ]; then
+        for _rt_p in ./*"${_rt_uid}"*.par; do
+            [ -f "$_rt_p" ] && grep -iE '^REMAP_(SCHEMA|TABLE)=' "$_rt_p"
+        done 2>/dev/null | tr '\n' ' '
+    fi
+    echo "$REMAP_PARAMS"
+}
+
+# ------------------------------------------------------------------------------
 # [FIX v09.04.00] (B19) Export/Import 로그 건수 대조 규칙 (콘솔 / HTML 공용)
 #   log_match_rows <exp_tmp> <imp_tmp> <imp_log>
 #     입력 : "OWNER.TABLE,건수" 목록 2개 (로그에서 추출한 것)
@@ -8565,11 +9403,18 @@ cs_check_note() {
 #     1) Import 로그의 REMAP_SCHEMA 로 새 스키마를 구해 정확히 찾는다.
 #     2) 그래도 없으면, 같은 테이블명이 Import 쪽에 "딱 하나" 있고 그 테이블이 Export
 #        쪽 다른 항목과 짝이 아닐 때만 대응시킨다.
+# [FIX v09.04.03] (B11) 이 도구는 PARFILE 로 impdp 를 돌려 REMAP 이 로그에 찍히지 않는다.
+#   그래서 1) 이 사실상 동작하지 않았다. 네 번째 인자로 REMAP 토큰
+#   ("REMAP_SCHEMA=A:B REMAP_TABLE=A.T:T2 ..." — REMAP_PARAMS / par 파일 형식)을 받아
+#   스키마와 테이블 이름 변경을 함께 적용한다.
+#   log_match_rows <exp_tmp> <imp_tmp> <imp_log> [remap_tokens]
 # ------------------------------------------------------------------------------
 log_match_rows() {
     _lm_exp="$1"; _lm_imp="$2"; _lm_log="$3"
-    _lm_remaps=$(grep -io 'remap_schema=[^ ]*' "$_lm_log" 2>/dev/null | sed 's/^[^=]*=//' \
-        | tr ',' '\n' | tr -d "\"'" | tr '[:lower:]' '[:upper:]' | sort -u)
+    _lm_tok=$( { grep -ioE 'remap_(schema|table)=[^ ]*' "$_lm_log" 2>/dev/null; \
+        printf '%s\n' $4; } | tr -d "\"'" | tr '[:lower:]' '[:upper:]')
+    _lm_remaps=$(echo "$_lm_tok" | grep '^REMAP_SCHEMA=' | sed 's/^[^=]*=//' | tr ',' '\n' | sort -u)
+    _lm_tremaps=$(echo "$_lm_tok" | grep '^REMAP_TABLE=' | sed 's/^[^=]*=//' | tr ',' '\n' | sort -u)
     _lm_matched=$(tmpf "lm_matched")
     : > "$_lm_matched"
     while IFS=, read -r _lm_t _lm_ec; do
@@ -8582,8 +9427,12 @@ log_match_rows() {
             _lm_own="${_lm_t%%.*}"
             _lm_tab="${_lm_t#*.}"
             _lm_nown=$(echo "$_lm_remaps" | awk -F: -v o="$_lm_own" '$1 == o { print $2; exit }')
-            if [ -n "$_lm_nown" ] && awk -F, -v t="${_lm_nown}.${_lm_tab}" '$1 == t { f=1 } END { exit !f }' "$_lm_imp"; then
-                _lm_cand="${_lm_nown}.${_lm_tab}"
+            _lm_ntab=$(echo "$_lm_tremaps" | awk -F: -v o="$_lm_t" -v n="$_lm_tab" '$1 == o || $1 == n { print $2; exit }')
+            _lm_ntab="${_lm_ntab##*.}"
+            [ -z "$_lm_nown" ] && [ -n "$_lm_ntab" ] && _lm_nown="$_lm_own"
+            [ -z "$_lm_ntab" ] && _lm_ntab="$_lm_tab"
+            if [ -n "$_lm_nown" ] && awk -F, -v t="${_lm_nown}.${_lm_ntab}" '$1 == t { f=1 } END { exit !f }' "$_lm_imp"; then
+                _lm_cand="${_lm_nown}.${_lm_ntab}"
             else
                 _lm_list=$(awk -F, -v n="$_lm_tab" '{ k = index($1, "."); if (substr($1, k + 1) == n) print $1 }' "$_lm_imp")
                 if [ -n "$_lm_list" ] && [ "$(echo "$_lm_list" | wc -l | tr -d ' ')" = "1" ] \
@@ -8743,7 +9592,7 @@ EOF
 
     if [ -f "$_rep_exp_tmp" ] && [ -f "$_rep_imp_tmp" ]; then
         # [FIX v09.04.00] (B19) 콘솔 결과와 같은 매칭 규칙 사용
-        log_match_rows "$_rep_exp_tmp" "$_rep_imp_tmp" "$_rep_imp_log" | while IFS='|' read -r _lv_st tbl exp_cnt imp_cnt; do
+        log_match_rows "$_rep_exp_tmp" "$_rep_imp_tmp" "$_rep_imp_log" "$(remap_tokens_for_log "$_rep_imp_log")" | while IFS='|' read -r _lv_st tbl exp_cnt imp_cnt; do
             case "$_lv_st" in
                 MISSING)  echo "      <tr data-status=\"missing\"><td><strong>$tbl</strong></td><td>$exp_cnt</td><td>N/A</td><td><span class=\"tag missing\">MISSING</span></td></tr>" ;;
                 MATCH)    echo "      <tr data-status=\"match\"><td><strong>$tbl</strong></td><td>$exp_cnt</td><td>$imp_cnt</td><td><span class=\"tag match\">MATCH</span></td></tr>" ;;
@@ -8986,7 +9835,7 @@ run_log_verify() {
     mismatches=0; matches=0
 
     # [FIX v09.04.00] (B19) 매칭 규칙은 log_match_rows 한 곳에서 (HTML 보고서와 동일)
-    log_match_rows "$exp_tmp" "$imp_tmp" "$imp_log" > "${imp_tmp}.rows"
+    log_match_rows "$exp_tmp" "$imp_tmp" "$imp_log" "$(remap_tokens_for_log "$imp_log")" > "${imp_tmp}.rows"
     while IFS='|' read -r _lv_st tbl exp_cnt imp_cnt; do
         case "$_lv_st" in
             MISSING)  printf "  %-38s | %-12s | %-12s | \033[31m%-10s\033[0m\n" "$tbl" "$exp_cnt" "MISSING" "[누락]"; mismatches=$((mismatches + 1)) ;;
@@ -9041,7 +9890,7 @@ run_live_monitor() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
 
     if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Refresh Interval in seconds [Default: 5]: "
     else printf "  새로고침 주기(초)를 입력하세요 [기본값: 5]: "; fi
@@ -9186,7 +10035,7 @@ run_diagnostics_mode() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
     UNIQUE_ID="DIAG_${DATE_STR}"
@@ -9367,7 +10216,7 @@ run_tuning_advisor() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
     calculate_parallel_degree
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
@@ -9547,14 +10396,50 @@ run_integrity_check() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
 
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Database Link to Source DB for Cross-Check (leave empty if none) [MIG_LINK]: "
-    else printf "  Source DB와 직접 교차 검증할 DB Link 이름 입력 (미사용 시 공백) [기본값: MIG_LINK]: "; fi
+    # [FIX v09.04.03] (B19) 안내의 [기본값: MIG_LINK] 와 실제 동작(빈 값 = 링크 없음)이 달랐다.
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Database Link to Source DB for Cross-Check (e.g. MIG_LINK) [Default: none]: "
+    else printf "  Source DB와 직접 교차 검증할 DB Link 이름 입력 (예: MIG_LINK) [기본값: 없음]: "; fi
     _read dblink_val
     # [FIX v09.03.02] (B21) 안내는 "미사용 시 공백" 인데 빈 값을 MIG_LINK 로 바꿔 버렸다.
     #   빈 값이면 링크 없이 진행한다. 이 링크는 시퀀스 동기화의 기준값으로 쓰인다.
     dblink_val=$(echo "$dblink_val" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
+
+    # [FIX v09.04.03] (B18) 시퀀스 동기화 범위 / 스키마 이름 변경
+    #   예전에는 내부 계정만 빼고 DB 의 "모든" 시퀀스를 대상으로 했고(이관과 무관한 앱 포함),
+    #   REMAP_SCHEMA 로 이름이 바뀐 스키마는 Source 에서 같은 이름을 찾지 못해 전부 SKIP 되었다.
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Sequence sync target schemas on Target (comma-separated, Enter = all non-internal): "
+    else printf "  시퀀스 동기화 대상 스키마 (Target 이름, 쉼표 구분, 엔터 = 내부 계정 제외 전체): "; fi
+    _read seq_owners
+    seq_owners=$(normalize_list "$seq_owners")
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Renamed schemas as SOURCE:TARGET pairs (e.g. HR:HR_NEW, Enter = none): "
+    else printf "  이름이 바뀐 스키마 Source:Target 쌍 (예: HR:HR_NEW, 쉼표 구분, 엔터 = 없음): "; fi
+    _read seq_remap
+    seq_remap=$(normalize_list "$seq_remap")
+    _seq_scope=""
+    [ -n "$seq_owners" ] && _seq_scope="AND sequence_owner IN ($(sql_in_list "$seq_owners"))"
+    _seq_src_case="s.sequence_owner"
+    if [ -n "$seq_remap" ]; then
+        _seq_src_case="CASE s.sequence_owner"
+        _sr_ifs=$IFS; IFS=","
+        for _sr_pair in $seq_remap; do
+            _sr_src=$(echo "$_sr_pair" | cut -d: -f1 | tr '[:lower:]' '[:upper:]')
+            _sr_tgt=$(echo "$_sr_pair" | cut -d: -f2 | tr '[:lower:]' '[:upper:]')
+            if echo "${_sr_src}:${_sr_tgt}" | grep -qE '^[A-Z][A-Z0-9_$#]*:[A-Z][A-Z0-9_$#]*$'; then
+                _seq_src_case="${_seq_src_case} WHEN '${_sr_tgt}' THEN '${_sr_src}'"
+            else
+                echo "  [경고] 형식이 맞지 않아 무시합니다: ${_sr_pair} (SOURCE:TARGET)"
+            fi
+        done
+        IFS=$_sr_ifs
+        _seq_src_case="${_seq_src_case} ELSE s.sequence_owner END"
+    fi
+    if [ -z "$dblink_val" ]; then
+        echo "  [주의] DB Link 가 없으면 시퀀스 보정은 Source 값과 비교하지 않고 대상 시퀀스를 모두"
+        echo "         +1000 앞당깁니다. Source 가 그보다 앞서 있으면 ORA-00001 을 막지 못하고,"
+        echo "         범위를 지정하지 않으면 이관과 무관한 시퀀스도 움직입니다."
+    fi
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
     UNIQUE_ID="INTEGRITY_${DATE_STR}"
@@ -9649,6 +10534,8 @@ EOF
 --  Prevents ORA-00001 unique constraint violations on Target DB
 --  Generated for Job: ${UNIQUE_ID}
 --  Reference DB Link: ${dblink_val:-(none - fixed +1000 headroom mode)}
+--  Scope            : ${seq_owners:-(all non-internal schemas)}
+--  Renamed schemas  : ${seq_remap:-(none)}
 -- ==============================================================================
 SET SERVEROUTPUT ON SIZE UNLIMITED LINES 200
 $PDB_SWITCH_SQL
@@ -9663,6 +10550,7 @@ DECLARE
   v_skip   NUMBER := 0;
   v_err    NUMBER := 0;
   v_seq    VARCHAR2(300);
+  v_srcown VARCHAR2(128);
 BEGIN
   IF v_link IS NULL THEN
     DBMS_OUTPUT.PUT_LINE('>> No reference DB Link: adding fixed +1000 headroom to ascending sequences.');
@@ -9673,10 +10561,12 @@ BEGIN
     SELECT sequence_owner, sequence_name, last_number, increment_by, max_value, cache_size
       FROM dba_sequences
      WHERE ${_seq_excl}
+       ${_seq_scope}
        AND sequence_name NOT LIKE 'ISEQ' || CHR(36) || CHR(36) || '%'
      ORDER BY sequence_owner, sequence_name
   ) LOOP
     v_seq := '"' || s.sequence_owner || '"."' || s.sequence_name || '"';
+    v_srcown := ${_seq_src_case};
     BEGIN
       v_gap := NULL;
       IF s.increment_by <= 0 THEN
@@ -9688,12 +10578,12 @@ BEGIN
         BEGIN
           EXECUTE IMMEDIATE 'SELECT last_number FROM dba_sequences@' || v_link ||
                             ' WHERE sequence_owner = :1 AND sequence_name = :2'
-             INTO v_remote USING s.sequence_owner, s.sequence_name;
+             INTO v_remote USING v_srcown, s.sequence_name;
         EXCEPTION WHEN NO_DATA_FOUND THEN
           v_remote := NULL;
         END;
         IF v_remote IS NULL THEN
-          DBMS_OUTPUT.PUT_LINE('  [SKIP] ' || v_seq || ' : not found in Source');
+          DBMS_OUTPUT.PUT_LINE('  [SKIP] ' || v_seq || ' : not found in Source (' || v_srcown || ')');
           v_skip := v_skip + 1;
         ELSIF v_remote <= s.last_number THEN
           v_skip := v_skip + 1;    -- 이미 Source 와 같거나 앞서 있음
@@ -9803,12 +10693,15 @@ EXCLEOF
     # 사용자가 추가로 제외하고 싶은 계정 반영
     if [ -n "$DEEP_EXTRA_EXCLUDE" ]; then
         _bx_list=""
-        IFS_BACKUP=$IFS; IFS=","
+        # [v09.04.03] (개선5) 공용 IFS_BACKUP 대신 이 함수 전용 변수. 다른 함수가 IFS_BACKUP 으로
+        #   IFS 를 잡아 둔 채 이 함수를 부르면 복원값이 덮여 호출부의 단어 분리가 바뀌었다.
+        #   입력값의 작은따옴표도 이중화한다 (SQL IN 목록에 그대로 들어간다).
+        _bx_ifs=$IFS; IFS=","
         for _bx in $DEEP_EXTRA_EXCLUDE; do
-            _bx=$(echo "$_bx" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
+            _bx=$(echo "$_bx" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}' | sed "s/'/''/g")
             [ -n "$_bx" ] && _bx_list="${_bx_list},'${_bx}'"
         done
-        IFS=$IFS_BACKUP
+        IFS=$_bx_ifs
         DEEP_EXCL_OWNERS="${DEEP_EXCL_OWNERS}${_bx_list}"
     fi
     return 0
@@ -11196,7 +12089,7 @@ run_deep_diff_mode() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
     if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Job ID [Default: DEEP_%s]: " "${DATE_STR}"
@@ -11766,7 +12659,7 @@ run_hash_mode() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
     calculate_parallel_degree
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
@@ -11887,7 +12780,7 @@ run_rowcount_mode() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
     calculate_parallel_degree
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
@@ -12082,7 +12975,7 @@ run_cleanup_mode() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
 
     echo "----------------------------------------------------------------------"
     if [ "$LANG_PREF" = "EN" ]; then
@@ -12500,7 +13393,7 @@ run_resume_mode() {
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
     check_db_env || return 1
-    fetch_db_info
+    fetch_db_info || return 1   # [FIX v09.04.03] (B10) PDB 미결정 시 중단
 
     _job_tmp="$(tmpf dp_jobs.tmp)"
     _job_idx="$(tmpf dp_jobs.indexed)"
@@ -12704,7 +13597,7 @@ echo "====================================================================="
 _dp_par="./.dp_attach_\$\$.par"
 _old_umask=\$(umask); umask 077
 cat > "\$_dp_par" <<PAR_EOF
-USERID="$(hd_esc "$_dp_conn")"
+$(hd_esc "$(par_userid "$_dp_conn")")
 ATTACH=${SEL_JOB_OWNER}.${SEL_JOB_NAME}
 PAR_EOF
 umask "\$_old_umask"
