@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.01.00 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.03.01 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -77,6 +77,31 @@
 #                       복붙된 heredoc 을 공통 함수로 묶고 종료코드로 판정
 #        - [FIX v09.02] 접속 판정을 종료코드 기반으로 전환. 딕셔너리 한 줄만
 #                       권한으로 실패해도 전체 수동 입력으로 떨어지던 것 해소
+#        - [FIX v09.03.01] 1차 수정 — P0 7건 + MOCK 회귀 기반 1건
+#            (E14) MOCK 의 SCHEMA 모드 대상 목록 분기 누락. "sqlplus: command not
+#                  found" 문구가 스키마 이름으로 선택되던 문제
+#            (B2)  단계별 복구 2단계(DATA_ONLY)에 TABLE_EXISTS_ACTION=SKIP 이 그대로
+#                  들어가 데이터가 0건 적재되던 문제. 단계별 매핑 도입, SKIP 은
+#                  통합 복구로 전환(기본) 또는 APPEND/TRUNCATE 선택
+#            (B10) 사후 검증 스크립트에 DIR_PHYSICAL_PATH / UNIQUE_ID 가 정의되지 않아
+#                  로그 대조가 항상 건너뛰어지던 문제. 불일치 시 비0 종료
+#            (B4)  FK/트리거 비활성화·재활성화가 DB 전체 대상이던 문제. 이관 대상
+#                  (REMAP 반영 후)으로 한정하고 Oracle 내부 계정 제외. 끈 목록을
+#                  SYSTEM.MIG_DISABLED_OBJ 에 기록해 그것만 복원. 원래 VALIDATED 였던
+#                  FK 는 검증 복원 SQL(impdp_2_2_validate_fk_*.sql)을 따로 생성
+#            (B1)  Source 파이프라인에 Target 용 계정/TBS DDL 과 GRANT 가 섞여 Source
+#                  DB 에 실행되던 문제. Target 용 파일로 분리하고 Source 의 접속
+#                  정보·SID·PDB 를 박지 않음 (Target 에서 MIG_TGT_CONN 또는 입력)
+#            (B5)  사전 생성 계정 비밀번호가 전부 "oracle" 이던 문제. DBMS_METADATA 로
+#                  원래 해시를 유지하고, 못 가져오면 임의 비밀번호 + EXPIRE + LOCK.
+#                  "_ORACLE_SCRIPT" 사용 제거 (ORACLE_MAINTAINED=Y 로 찍히던 문제)
+#            (B7)  실행하지 않은 스텝이 [PASS] + DONE 으로 기록되던 문제. 보류는
+#                  종료코드 75, 마스터 러너는 MIG_NONINTERACTIVE=1 을 넘김
+#            (B8)  실패가 성공으로 보고되던 문제. 통계 export/import, 원격 체크섬,
+#                  계정·권한·FK·통계잠금 래퍼에 종료코드 + 스풀 로그 판정 추가
+#        - [v09.03.01] 버전 표기 통일 (헤더 / SCRIPT_VERSION / 파일명)
+#        - 알려진 미해결 — 2차 이후: E1(비밀번호 $) E2(30자) E3(Target 파이프라인
+#          순서: 계정/TBS DDL 이 PDB 생성보다 앞) 외. 1차 우선순위표 참조
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -92,7 +117,7 @@
 # ==============================================================================
 
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.02.00"
+SCRIPT_VERSION="09.03.01"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -133,7 +158,7 @@ MOCK_MODE="false"
 #     [생성 로직 대체]  위험. MOCK 도 실제 경로를 타게 해야 한다.
 #     [환경 관측 대체]  허용. 수치/목록만 가짜이고, 틀리면 실환경에서 바로 보인다.
 #
-#   현재 상태 (총 22곳)
+#   현재 상태 (총 23곳)
 #     ── 생성 로직 대체: 해소됨 ──────────────────────────────────────────
 #       fetch_db_info            PDB 접속문자열을 join_pdb_connect 로 산출 (v09.02)
 #       setup_deep_dblink        링크 미존재로 가정해 생성 DDL 경로를 태움 (v09.02)
@@ -147,7 +172,8 @@ MOCK_MODE="false"
 #       run_resume_mode (2곳)    진행 중 Data Pump 작업 목록
 #     ── 목록·수치만 가짜, 생성 로직은 그대로 통과 ───────────────────────
 #       setup_db_directory               dba_directories 목록
-#       select_migration_targets (3곳)   스키마/테이블/TBS 목록
+#       select_migration_targets (4곳)   스키마(SCHEMA 모드 / TABLE 모드용)/테이블/TBS 목록
+#                                        (SCHEMA 모드 분기는 v09.03.01 에서 추가 — 누락돼 있었음)
 #       generate_target_env_ddl          대상 목록
 #       generate_grants_and_synonyms_scripts  의존 객체 목록
 #       run_network_link_checks          사전점검 결과를 OK 로 고정
@@ -205,6 +231,11 @@ GENERATED_STATS_SCRIPTS=""
 GENERATED_XFER_SCRIPTS=""
 GENERATED_TARGET_SCRIPTS=""
 GENERATED_UTIL_SCRIPTS=""
+# [FIX v09.03.01] Source 에서 만들었지만 Target 에서 실행해야 하는 스크립트 (파이프라인 미포함)
+GENERATED_FOR_TARGET_SCRIPTS=""
+# [FIX v09.03.01] 지금 생성 중인 쪽 (SOURCE | TARGET). 공용 생성 함수가 이 값으로
+#   생성물을 어느 파이프라인에 넣을지, 접속 정보를 박을지 말지를 정한다.
+GEN_ROLE=""
 
 # [NEW v08] DEEP VALIDATION 관련 전역 변수
 GENERATED_DEEPDIFF_SCRIPTS=""
@@ -409,6 +440,179 @@ clear_screen() {
 to_num() {
     _tn_val=$(echo "$1" | tr -dc '0-9')
     if [ -z "$_tn_val" ]; then echo "0"; else echo "$_tn_val"; fi
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.01] 생성 스크립트에 셸 값을 그대로 박아 넣기 위한 인용
+#   값 전체를 작은따옴표로 감싸고, 값 안의 ' 는 '\'' 로 바꾼다.
+#     /backup/my dumps  ->  '/backup/my dumps'
+# ------------------------------------------------------------------------------
+sh_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.01] 쉼표 구분 목록 -> SQL IN 목록  ('A','B')
+#   앞뒤 공백 제거, 대문자화(impdp 가 따옴표 없는 이름을 대문자로 다루는 것과 맞춤),
+#   값 안의 ' 는 '' 로 이중화한다.
+# ------------------------------------------------------------------------------
+sql_in_list() {
+    _sil_out=""
+    _sil_ifs=$IFS; IFS=","
+    for _sil_i in $1; do
+        _sil_i=$(echo "$_sil_i" | awk '{$1=$1;print}' | tr '[:lower:]' '[:upper:]' | sed "s/'/''/g")
+        [ -z "$_sil_i" ] && continue
+        [ -n "$_sil_out" ] && _sil_out="${_sil_out},"
+        _sil_out="${_sil_out}'${_sil_i}'"
+    done
+    IFS=$_sil_ifs
+    echo "$_sil_out"
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.01] REMAP_PARAMS 에서 새 이름 찾기
+#   remap_lookup REMAP_SCHEMA HR          -> HR_NEW   (매핑이 없으면 HR)
+#   remap_lookup REMAP_TABLE  HR.EMP      -> EMP_NEW
+#   REMAP_PARAMS 는 공백 구분 토큰이므로, 호출부가 IFS="," 로 바꿔 둔 상태여도
+#   여기서는 공백 기준으로 다시 나눈다.
+# ------------------------------------------------------------------------------
+remap_lookup() {
+    _rl_kind="$1"
+    _rl_old=$(echo "$2" | tr '[:lower:]' '[:upper:]')
+    _rl_new="$_rl_old"
+    # unset IFS = POSIX 기본 분리(공백/탭/개행). 공백 문자를 리터럴로 적지 않아 편집기·
+    # 전송 과정에서 탭이 사라져도 동작이 바뀌지 않는다.
+    _rl_ifs=$IFS; unset IFS
+    for _rl_tok in $REMAP_PARAMS; do
+        _rl_tok=$(echo "$_rl_tok" | tr '[:lower:]' '[:upper:]')
+        case "$_rl_tok" in
+            "${_rl_kind}=${_rl_old}:"*) _rl_new="${_rl_tok#"${_rl_kind}=${_rl_old}:"}" ;;
+        esac
+    done
+    IFS=$_rl_ifs
+    echo "$_rl_new"
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.01] Oracle 내부 계정 제외 조건
+#   ora_internal_excl <컬럼명>
+#   공용 제외 목록(DEEP_EXCL_OWNERS)에 더해, 12c 이상이면 ORACLE_MAINTAINED='Y'
+#   계정도 뺀다. FK/트리거 일괄 조작이 MDSYS·CTXSYS 같은 내부 스키마에 닿지 않게 한다.
+# ------------------------------------------------------------------------------
+ora_internal_excl() {
+    build_exclude_owner_list
+    _oie="$1 NOT IN (${DEEP_EXCL_OWNERS})"
+    _oie_major=$(echo "$DB_VERSION" | cut -d'.' -f1 | tr -dc '0-9')
+    if [ -n "$_oie_major" ] && [ "$_oie_major" -ge 12 ]; then
+        _oie="$_oie AND $1 NOT IN (SELECT username FROM dba_users WHERE oracle_maintained = 'Y')"
+    fi
+    echo "$_oie"
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.01] 이관 대상 범위 조건 (Target 측, REMAP 반영 후 이름 기준)
+#   mig_scope_pred <소유자컬럼> <테이블컬럼>
+#     SCHEMA     : 소유자 IN (대상 스키마)
+#     TABLE      : (소유자, 테이블) IN (대상 테이블)
+#     TABLESPACE : (소유자, 테이블) 이 대상 테이블스페이스에 있는 것
+#     FULL       : 전체 (단, Oracle 내부 계정 제외)
+#   모든 경우에 Oracle 내부 계정 제외 조건이 붙는다.
+# ------------------------------------------------------------------------------
+mig_scope_pred() {
+    _ms_oc="$1"; _ms_tc="$2"
+    _ms_pred=""
+    _ms_ifs=$IFS
+    case "$MIG_TYPE" in
+        SCHEMA)
+            _ms_list=""
+            IFS=","
+            for _ms_i in $FINAL_LIST; do
+                _ms_i=$(echo "$_ms_i" | awk '{$1=$1;print}')
+                [ -z "$_ms_i" ] && continue
+                _ms_i=$(remap_lookup REMAP_SCHEMA "$_ms_i")
+                _ms_list="${_ms_list:+${_ms_list},}${_ms_i}"
+            done
+            IFS=$_ms_ifs
+            _ms_in=$(sql_in_list "$_ms_list")
+            [ -n "$_ms_in" ] && _ms_pred="${_ms_oc} IN (${_ms_in})"
+            ;;
+        TABLE)
+            _ms_tuples=""
+            IFS=","
+            for _ms_i in $FINAL_LIST; do
+                _ms_i=$(echo "$_ms_i" | awk '{$1=$1;print}' | sed 's/:.*$//' | tr '[:lower:]' '[:upper:]')
+                [ -z "$_ms_i" ] && continue
+                _ms_own=$(echo "$_ms_i" | cut -d'.' -f1)
+                _ms_tab=$(echo "$_ms_i" | cut -d'.' -f2-)
+                [ "$_ms_own" = "$_ms_i" ] && continue
+                _ms_new_own=$(remap_lookup REMAP_SCHEMA "$_ms_own")
+                _ms_new_tab=$(remap_lookup REMAP_TABLE "${_ms_own}.${_ms_tab}")
+                # REMAP_TABLE 의 새 이름은 테이블명만 온다. 매핑이 없으면 원래 OWNER.TABLE 이 돌아온다.
+                _ms_new_tab=$(echo "$_ms_new_tab" | sed 's/^.*\.//')
+                _ms_new_own=$(echo "$_ms_new_own" | sed "s/'/''/g")
+                _ms_new_tab=$(echo "$_ms_new_tab" | sed "s/'/''/g")
+                _ms_tuples="${_ms_tuples:+${_ms_tuples},}('${_ms_new_own}','${_ms_new_tab}')"
+            done
+            IFS=$_ms_ifs
+            [ -n "$_ms_tuples" ] && _ms_pred="(${_ms_oc}, ${_ms_tc}) IN (${_ms_tuples})"
+            ;;
+        TABLESPACE)
+            _ms_list=""
+            IFS=","
+            for _ms_i in $FINAL_LIST; do
+                _ms_i=$(echo "$_ms_i" | awk '{$1=$1;print}')
+                [ -z "$_ms_i" ] && continue
+                _ms_i=$(remap_lookup REMAP_TABLESPACE "$_ms_i")
+                _ms_list="${_ms_list:+${_ms_list},}${_ms_i}"
+            done
+            IFS=$_ms_ifs
+            _ms_in=$(sql_in_list "$_ms_list")
+            if [ -n "$_ms_in" ]; then
+                _ms_pred="(${_ms_oc}, ${_ms_tc}) IN (SELECT owner, table_name FROM dba_tables WHERE tablespace_name IN (${_ms_in})"
+                _ms_pred="${_ms_pred} UNION SELECT table_owner, table_name FROM dba_tab_partitions WHERE tablespace_name IN (${_ms_in})"
+                _ms_pred="${_ms_pred} UNION SELECT table_owner, table_name FROM dba_tab_subpartitions WHERE tablespace_name IN (${_ms_in}))"
+            fi
+            ;;
+        *)
+            _ms_pred="1 = 1"
+            ;;
+    esac
+    IFS=$_ms_ifs
+    # 대상이 비면 아무것도 건드리지 않는다 (예전처럼 "전부" 로 넓어지지 않게).
+    [ -z "$_ms_pred" ] && _ms_pred="1 = 0"
+    echo "${_ms_pred} AND $(ora_internal_excl "$_ms_oc")"
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.01] 생성 래퍼 셸의 sqlplus 결과 판정 블록
+#   emit_sql_result_check <대상.sh> <스풀로그> <허용할 ORA 정규식 | ""> <설명>
+#
+#   v09.03.00 까지 대부분의 생성 래퍼는 sqlplus 를 돌리고 끝이었다. sqlplus 는
+#   SQL 이 실패해도 0 으로 끝나므로 마스터 러너는 전부 [PASS] 로 기록했다.
+#   여기서는 두 가지를 같이 본다.
+#     1) 종료코드 — 접속 실패 / WHENEVER SQLERROR EXIT 로 끝난 경우
+#     2) 스풀 로그의 ORA- / SP2- / PLS- — CONTINUE 로 끝까지 도는 DDL 묶음
+#   재실행에서 "이미 존재" 처럼 정상으로 볼 코드만 허용 목록으로 뺀다.
+#   이 블록은 sqlplus heredoc 바로 다음에 붙어야 한다 (\$? 를 바로 받는다).
+# ------------------------------------------------------------------------------
+emit_sql_result_check() {
+    _esc_file="$1"; _esc_log="$2"; _esc_allow="${3:-^\$}"; _esc_desc="$4"
+    cat <<EOF >> "$_esc_file"
+_sql_rc=\$?
+_sql_errs=""
+if [ -f "$_esc_log" ]; then
+    _sql_errs=\$(grep -E 'ORA-[0-9]{5}|SP2-[0-9]{4}|PLS-[0-9]{5}' "$_esc_log" | grep -vE '$_esc_allow')
+elif [ "\$_sql_rc" -eq 0 ]; then
+    _sql_errs="(스풀 로그가 만들어지지 않았습니다: $_esc_log)"
+fi
+if [ "\$_sql_rc" -ne 0 ] || [ -n "\$_sql_errs" ]; then
+    echo ">> [실패] ${_esc_desc} (sqlplus exit=\$_sql_rc)"
+    [ -n "\$_sql_errs" ] && echo "\$_sql_errs" | head -n 10 | sed 's/^/     /'
+    echo ">>        전체 로그: $_esc_log"
+    exit 1
+fi
+echo ">> [완료] ${_esc_desc}"
+EOF
 }
 
 # ------------------------------------------------------------------------------
@@ -1388,8 +1592,15 @@ generate_run_prompt() {
 
 # ==============================================================================
 # 안전 장치: 사용자 명시적 동의 후 실행 (백그라운드 감지 시 자동 스킵)
+#   [FIX v09.03.01] 종료코드 75 = "사용자가 실행을 보류함 (아무것도 안 함)".
+#     v09.03.00 까지는 보류해도 exit 0 이라, 마스터 러너가 이 스텝을 [PASS] 로
+#     기록하고 체크포인트(DONE)까지 남겨 --resume 때 영원히 건너뛰었다.
+#   [FIX v09.03.01] MIG_NONINTERACTIVE=1 이면 확인을 생략한다. 마스터 러너가
+#     이 값을 넘긴다 (실행 여부는 마스터가 이미 결정했다).
 # ==============================================================================
-if [ -t 0 ]; then
+if [ "\${MIG_NONINTERACTIVE:-0}" = "1" ]; then
+    echo ">> [INFO] 마스터 파이프라인 실행 — 개별 실행 확인을 생략합니다."
+elif [ -t 0 ]; then
     printf "\n"
     printf "=====================================================================\n"
     printf "  [실행 확인/Run Check] $desc\n"
@@ -1399,7 +1610,7 @@ if [ -t 0 ]; then
     read _conf_ans
     if [ "\$_conf_ans" != "y" ] && [ "\$_conf_ans" != "Y" ]; then
         echo ">> 실행이 취소되었습니다. / Execution cancelled."
-        exit 1
+        exit 75
     fi
     echo ">> 작업을 백그라운드(nohup)로 실행하기를 권장합니다. / Background execution is recommended."
     echo ">> 백그라운드로 실행할 경우: nohup bash \$(basename \$0) > \$(basename \$0).out 2>&1 &"
@@ -1407,7 +1618,7 @@ if [ -t 0 ]; then
     read _fg_ans
     if [ "\$_fg_ans" != "y" ] && [ "\$_fg_ans" != "Y" ]; then
         echo ">> 실행하지 않고 종료합니다. / Exiting without execution."
-        exit 0
+        exit 75
     fi
 else
     echo ">> [INFO] 백그라운드(비대화형) 실행이 감지되어 사용자 확인 절차를 생략하고 즉시 실행합니다."
@@ -1429,6 +1640,7 @@ reset_generation_state() {
     GENERATED_DEEPDIFF_SCRIPTS=""
     GENERATED_DEEPDIFF_PRE=""
     GENERATED_ROWCOUNT_SCRIPTS=""
+    GENERATED_FOR_TARGET_SCRIPTS=""
     SELECTED_LIST=""
     FINAL_LIST=""
     FINAL_IN_CLAUSE=""
@@ -1650,15 +1862,26 @@ select_migration_targets() {
     
     case "$target_type" in
         SCHEMA)
+            # [FIX v09.03.01] (E14) 이 분기에만 MOCK 처리가 없어서, MOCK 에서는
+            #   "sqlplus: command not found" 문구가 스키마 이름으로 선택되고 그 뒤
+            #   파일명 생성이 깨졌다. 다른 두 분기(TABLE / TABLESPACE)와 같은 방식의
+            #   목록 대체이며, 생성 로직은 그대로 탄다 (MOCK BYPASS INVENTORY 참조).
+            if [ "$MOCK_MODE" = "true" ]; then
+                cat <<EOF > "$items_file"
+KMSUNG
+SCOTT
+EOF
+            else
             sqlplus -S /nolog <<EOF > "$items_file" 2>&1
 connect $conn_str
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 100
 $PDB_SWITCH_SQL
-SELECT username FROM dba_users${DBLINK_SUFFIX} 
+SELECT username FROM dba_users${DBLINK_SUFFIX}
 WHERE username NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','WMSYS','XDB','ANONYMOUS','XS\$NULL','ORDDATA','ORDPLUGINS','SI_INFORMTN_SCHEMA','MDSYS','ORACLE_OCM', 'DIP', 'ORACLE_MAINT', 'GSMADMIN_INTERNAL', 'GSMCATUSER', 'GGSYS', 'SYSBACKUP', 'SYSDG', 'SYSKM', 'SYSMAC', 'C##DIV', 'AUDSYS')
 ORDER BY username;
 EXIT;
 EOF
+            fi
             ;;
         TABLE)
             if [ "$LANG_PREF" = "EN" ]; then echo "  [Schema List for Table Selection]"
@@ -1937,6 +2160,80 @@ EOF
     return 0
 }
 
+# ------------------------------------------------------------------------------
+# [FIX v09.03.01] (B1) Target DB 에 SQL 을 적용하는 래퍼 셸의 머리 부분
+#   emit_tgt_wrapper_header <대상.sh>
+#     GEN_ROLE=TARGET : 지금 이 서버(=Target)의 환경과 접속 정보를 박는다 (기존 방식).
+#     GEN_ROLE=SOURCE : Source 서버에서 만들어 Target 으로 복사해 실행하는 파일이다.
+#                       Source 의 ORACLE_SID / 접속 계정을 박으면 Target 에서 엉뚱한
+#                       DB 에 붙으므로, Target 서버의 환경을 그대로 쓰고 접속 계정은
+#                       MIG_TGT_CONN 환경변수 또는 실행 시 입력으로 받는다.
+#   tgt_wrapper_connect_line : 래퍼 안 sqlplus heredoc 에 넣을 connect 줄
+# ------------------------------------------------------------------------------
+emit_tgt_wrapper_header() {
+    if [ "$GEN_ROLE" = "SOURCE" ]; then
+        cat <<'EOF' > "$1"
+#!/bin/bash
+# ==============================================================================
+#  [v09.03.01] Source 서버에서 생성 / Target 서버에서 실행하는 스크립트입니다.
+#   - 같은 이름의 .sql 파일과 함께 Target 서버의 한 디렉토리에 복사하십시오.
+#   - Target 서버의 ORACLE_HOME / ORACLE_SID 환경을 그대로 사용합니다.
+#   - 접속 계정: 환경변수 MIG_TGT_CONN, 없으면 실행 시 입력 (엔터 = / as sysdba)
+# ==============================================================================
+cd "$(dirname "$0")" || exit 1
+[ -n "$ORACLE_HOME" ] && export PATH="$ORACLE_HOME/bin:$PATH"
+export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+if ! command -v sqlplus >/dev/null 2>&1; then
+    echo ">> [오류] sqlplus 를 찾을 수 없습니다. Target 서버의 Oracle 환경(ORACLE_HOME)을 먼저 설정하십시오."
+    exit 1
+fi
+if [ -z "$MIG_TGT_CONN" ]; then
+    if [ -t 0 ]; then
+        trap 'stty echo 2>/dev/null; exit 130' INT TERM
+        printf "Target DB 접속 계정 (예: system/pw@TGTPDB, 엔터 = / as sysdba): "
+        stty -echo 2>/dev/null; IFS= read -r MIG_TGT_CONN; stty echo 2>/dev/null; echo ""
+        trap - INT TERM
+    fi
+    [ -z "$MIG_TGT_CONN" ] && MIG_TGT_CONN="/ as sysdba"
+fi
+EOF
+    else
+        cat <<EOF > "$1"
+#!/bin/bash
+export ORACLE_HOME=$ORACLE_HOME
+export ORACLE_SID=$ORACLE_SID
+export PATH=\$ORACLE_HOME/bin:\$PATH
+export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+EOF
+    fi
+}
+
+tgt_wrapper_connect_line() {
+    if [ "$GEN_ROLE" = "SOURCE" ]; then
+        # 런타임 변수 — 값 속의 $ 는 다시 해석되지 않는다.
+        echo 'connect $MIG_TGT_CONN'
+    else
+        echo "connect $DB_CONN"
+    fi
+}
+
+# Target 측 SQL 파일 안의 컨테이너 전환 부분
+#   TARGET : 지금 선택된 PDB 로 전환 (기존 방식)
+#   SOURCE : Source 의 PDB 이름은 Target 과 다를 수 있으므로 넣지 않고 안내만 남긴다.
+emit_tgt_container_block() {
+    if [ "$GEN_ROLE" = "SOURCE" ]; then
+        cat <<'EOF'
+-- [v09.03.01] 이 파일은 Source 서버에서 생성되었고 Target 에서 실행합니다.
+--   Target 이 CDB 라면 대상 PDB 서비스로 직접 접속해서 실행하거나,
+--   아래 줄의 주석을 풀고 Target PDB 이름을 넣으십시오.
+-- ALTER SESSION SET CONTAINER = <TARGET_PDB>;
+EOF
+    else
+        echo "-- [Multitenant Mode] Switch session container to target PDB"
+        echo "$PDB_SWITCH_SQL"
+    fi
+}
+
 generate_target_env_ddl() {
     # [NEW v08.03] 함수 스크래치 변수 지역화 — 메뉴 재진입/함수 간 값 누수 차단
     # [v09.02] local 제거 (ksh 비호환): _tgt_in_clause
@@ -1961,19 +2258,19 @@ generate_target_env_ddl() {
 -- ==============================================================================
 --  Target DB Pre-requisite Setup Script (Tablespaces & Users)
 --  Generated for Migration Job: ${UNIQUE_ID}
+--  [v09.03.01] 이 파일에는 계정 비밀번호 해시(IDENTIFIED BY VALUES)가 들어갈 수
+--  있습니다 (권한 600). 공유하지 말고 사용 후 삭제하십시오.
 -- ==============================================================================
 SET ECHO ON LOGONLY
+SET SERVEROUTPUT ON SIZE UNLIMITED
 SPOOL 00_create_target_env_${UNIQUE_ID}.log
 
--- [Multitenant Mode] Switch session container to target PDB
-$PDB_SWITCH_SQL
+$(emit_tgt_container_block)
 
--- [Oracle 12c+ Compatibility] Bypass C## prefix requirement if in CDB\$ROOT
-BEGIN
-  EXECUTE IMMEDIATE 'ALTER SESSION SET "_ORACLE_SCRIPT"=true';
-EXCEPTION WHEN OTHERS THEN NULL;
-END;
-/
+-- [v09.03.01] 예전에는 여기서 세션 파라미터 "_ORACLE_SCRIPT" 를 켜서 CDB 루트에서도
+--   C## 접두어 없이 계정을 만들었다. 그렇게 만든 계정은 ORACLE_MAINTAINED=Y 로
+--   표시되어 이후 expdp FULL / 통계 수집 / 검증 대상에서 빠진다. 그래서 제거했다.
+--   업무 계정은 대상 PDB 안에 만들어야 한다 (위 컨테이너 전환 참조).
 
 PROMPT ========================================================================
 PROMPT 1. Creating Tablespaces (Default size: 100M with AUTOEXTEND)
@@ -1981,18 +2278,27 @@ PROMPT ========================================================================
 EOF
 
         if [ "$MOCK_MODE" = "true" ]; then
+            # [FIX v09.03.01] (B5) MOCK 생성물도 실제 경로와 같은 형태로 만든다.
+            #   (해시를 가져온 경우 / 못 가져와 임의 비밀번호 + 잠금으로 만드는 경우)
             cat <<EOF >> "$ENV_SQL"
 CREATE TABLESPACE USERS DATAFILE '${user_df_dir}/users01.dbf' SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
 CREATE BIGFILE TABLESPACE TS_DATA DATAFILE '${user_df_dir}/ts_data01.dbf' SIZE 500M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
 
 PROMPT ========================================================================
-PROMPT 2. Creating Database Users & Granting Privileges
+PROMPT 2. Creating Database Users (original password hash preserved when available)
 PROMPT ========================================================================
-CREATE USER KMSUNG IDENTIFIED BY "oracle" DEFAULT TABLESPACE USERS TEMPORARY TABLESPACE TEMP;
-GRANT CONNECT, RESOURCE, CREATE SESSION, UNLIMITED TABLESPACE TO KMSUNG;
-
-CREATE USER SCOTT IDENTIFIED BY "tiger" DEFAULT TABLESPACE USERS TEMPORARY TABLESPACE TEMP;
-GRANT CONNECT, RESOURCE, CREATE SESSION, UNLIMITED TABLESPACE TO SCOTT;
+CREATE USER "KMSUNG" IDENTIFIED BY VALUES 'S:MOCKHASH0000000000000000000000000000000000000000000000000000;T:MOCKHASH' DEFAULT TABLESPACE "USERS" TEMPORARY TABLESPACE "TEMP";
+GRANT CONNECT, RESOURCE, CREATE SESSION, UNLIMITED TABLESPACE TO "KMSUNG";
+DECLARE
+  v_pw VARCHAR2(40) := 'M' || DBMS_RANDOM.STRING('X', 16) || '#9a';
+BEGIN
+  EXECUTE IMMEDIATE 'CREATE USER "SCOTT" IDENTIFIED BY "' || v_pw || '" DEFAULT TABLESPACE "USERS" TEMPORARY TABLESPACE "TEMP" PASSWORD EXPIRE ACCOUNT LOCK';
+  DBMS_OUTPUT.PUT_LINE('[WARN] SCOTT : source password hash not available - created with a random password, EXPIRED and LOCKED. Reset it after migration.');
+EXCEPTION WHEN OTHERS THEN
+  IF SQLCODE = -1920 THEN DBMS_OUTPUT.PUT_LINE('SCOTT : already exists - skipped'); ELSE RAISE; END IF;
+END;
+/
+GRANT CONNECT, RESOURCE, CREATE SESSION, UNLIMITED TABLESPACE TO "SCOTT";
 
 -- [Oracle 23c Compatibility] Grant DB_DEVELOPER_ROLE if available
 BEGIN
@@ -2038,6 +2344,22 @@ EOF
                 fi
             fi
 
+            # ------------------------------------------------------------------
+            # [FIX v09.03.01] (B5) 계정 DDL — 원래 비밀번호를 유지한다.
+            #   v09.03.00 까지는 모든 계정을 IDENTIFIED BY "oracle" 로 만들었다.
+            #   계정이 미리 있으면 impdp 는 USER 생성을 건너뛰므로(이미 존재),
+            #   원래 비밀번호 해시가 반영되지 않고 이관된 모든 계정이 같은 약한
+            #   비밀번호로 남았다.
+            #     로컬 딕셔너리  : DBMS_METADATA.GET_DDL('USER') 그대로
+            #                      (IDENTIFIED BY VALUES '해시' / EXTERNALLY 등 원본 유지)
+            #     DB Link 너머   : 해시를 안전하게 가져올 수 없으므로, Target 에서
+            #                      실행할 때 임의 비밀번호 + EXPIRE + LOCK 으로 만든다.
+            #                      (파일에는 비밀번호가 남지 않는다)
+            #   CDB 공통 계정(C##)은 PDB 안에서 만들 수 없으므로 대상에서 뺀다.
+            #   DBMS_OUTPUT 으로 내보내는 문구는 Source 문자셋을 거치므로 영문으로 둔다.
+            # ------------------------------------------------------------------
+            if [ -n "$DBLINK_SUFFIX" ]; then _env_use_meta="FALSE"; else _env_use_meta="TRUE"; fi
+
             sqlplus -S /nolog <<SQL_EOF >> "$ENV_SQL" 2>/dev/null
 connect $DB_CONN
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 500 TRIMSPOOL ON
@@ -2049,39 +2371,92 @@ LEFT JOIN (SELECT tablespace_name, SUM(bytes)/1024/1024 as total_mb FROM dba_dat
   ON t.tablespace_name = s.tablespace_name
 $_tbs_where_clause;
 
-SELECT 'CREATE USER ' || username || ' IDENTIFIED BY "oracle" DEFAULT TABLESPACE ' || NVL(default_tablespace, 'USERS') || ' TEMPORARY TABLESPACE ' || NVL(temporary_tablespace, 'TEMP') || ';' || CHR(10) ||
-       'GRANT CONNECT, RESOURCE, CREATE SESSION, UNLIMITED TABLESPACE TO ' || username || ';'
-FROM dba_users${DBLINK_SUFFIX}
-$_usr_where_clause;
+PROMPT
+PROMPT PROMPT ========================================================================
+PROMPT PROMPT 2. Creating Database Users (original password hash preserved when available)
+PROMPT PROMPT ========================================================================
+SET LINES 32767 TRIMOUT ON
+SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
+DECLARE
+  v_meta BOOLEAN := ${_env_use_meta};
+  v_ddl  VARCHAR2(32767);
+BEGIN
+  IF v_meta THEN
+    DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE);
+  END IF;
+  FOR r IN (SELECT username,
+                   NVL(default_tablespace, 'USERS') dts,
+                   NVL(temporary_tablespace, 'TEMP') tts
+              FROM dba_users${DBLINK_SUFFIX}
+             $_usr_where_clause
+               AND username NOT LIKE 'C##%'
+             ORDER BY username) LOOP
+    v_ddl := NULL;
+    IF v_meta THEN
+      BEGIN
+        v_ddl := LTRIM(DBMS_LOB.SUBSTR(DBMS_METADATA.GET_DDL('USER', r.username), 32000, 1),
+                       CHR(10) || CHR(13) || ' ');
+      EXCEPTION WHEN OTHERS THEN
+        v_ddl := NULL;
+      END;
+    END IF;
+
+    IF v_ddl IS NOT NULL THEN
+      DBMS_OUTPUT.PUT_LINE(v_ddl);
+    ELSE
+      DBMS_OUTPUT.PUT_LINE('DECLARE');
+      DBMS_OUTPUT.PUT_LINE('  v_pw VARCHAR2(40) := ''M'' || DBMS_RANDOM.STRING(''X'', 16) || ''#9a'';');
+      DBMS_OUTPUT.PUT_LINE('BEGIN');
+      DBMS_OUTPUT.PUT_LINE('  EXECUTE IMMEDIATE ''CREATE USER "' || r.username || '" IDENTIFIED BY "'' || v_pw || ''" DEFAULT TABLESPACE "' || r.dts || '" TEMPORARY TABLESPACE "' || r.tts || '" PASSWORD EXPIRE ACCOUNT LOCK'';');
+      DBMS_OUTPUT.PUT_LINE('  DBMS_OUTPUT.PUT_LINE(''[WARN] ' || r.username || ' : source password hash not available - created with a random password, EXPIRED and LOCKED. Reset it after migration.'');');
+      DBMS_OUTPUT.PUT_LINE('EXCEPTION WHEN OTHERS THEN');
+      DBMS_OUTPUT.PUT_LINE('  IF SQLCODE = -1920 THEN DBMS_OUTPUT.PUT_LINE(''' || r.username || ' : already exists - skipped''); ELSE RAISE; END IF;');
+      DBMS_OUTPUT.PUT_LINE('END;');
+      DBMS_OUTPUT.PUT_LINE('/');
+    END IF;
+    DBMS_OUTPUT.PUT_LINE('GRANT CONNECT, RESOURCE, CREATE SESSION, UNLIMITED TABLESPACE TO "' || r.username || '";');
+  END LOOP;
+END;
+/
 EXIT;
 SQL_EOF
         fi
-        
+
         cat <<EOF >> "$ENV_SQL"
 
 SPOOL OFF
 EXIT;
 EOF
-        cat <<EOF > "$ENV_SH"
-#!/bin/bash
-export ORACLE_HOME=$ORACLE_HOME
-export ORACLE_SID=$ORACLE_SID
-export PATH=\$ORACLE_HOME/bin:\$PATH
-export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
-EOF
+        # [FIX v09.03.01] 비밀번호 해시가 들어갈 수 있으므로 다른 OS 계정이 읽지 못하게 한다.
+        chmod 600 "$ENV_SQL" 2>/dev/null
+
+        # [FIX v09.03.01] (B1) 래퍼의 환경/접속은 생성 위치에 따라 다르게 박는다.
+        # [FIX v09.03.01] (B8) 결과 판정 추가. 재실행에서 정상인 "이미 존재" 두 가지
+        #   (테이블스페이스 01543 / 계정 01920)만 허용하고, 나머지 오류는 실패로 끝낸다.
+        emit_tgt_wrapper_header "$ENV_SH"
         generate_run_prompt "$ENV_SH" "Target 사전 계정 및 테이블스페이스 생성 DDL 적용"
         cat <<EOF >> "$ENV_SH"
 echo ">> Target DB 사전 계정 및 테이블스페이스 생성 DDL을 적용합니다..."
+rm -f "00_create_target_env_${UNIQUE_ID}.log"
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+WHENEVER SQLERROR EXIT FAILURE
+$(tgt_wrapper_connect_line)
+WHENEVER SQLERROR CONTINUE
 @$ENV_SQL
 CONNECT_EOF
 EOF
+        emit_sql_result_check "$ENV_SH" "00_create_target_env_${UNIQUE_ID}.log" \
+            'ORA-01543|ORA-01920' "Target 사전 계정/테이블스페이스 DDL 적용"
         chmod 700 "$ENV_SH"
-        if [ -n "$GENERATED_TARGET_SCRIPTS" ]; then
+
+        # [FIX v09.03.01] (B1) Source 모드에서는 어느 파이프라인에도 넣지 않는다.
+        #   v09.03.00 까지는 GENERATED_META_SCRIPTS 앞에 붙어 Source 마스터 러너의
+        #   첫 스텝이 되었고, Target 용 DDL 을 Source DB 에 실행했다.
+        if [ "$GEN_ROLE" = "SOURCE" ]; then
+            GENERATED_FOR_TARGET_SCRIPTS="$GENERATED_FOR_TARGET_SCRIPTS $ENV_SH"
+        else
+            # (알려진 문제 E3 — PDB 생성 스텝보다 앞에 놓인다. 2차 수정 대상)
             GENERATED_TARGET_SCRIPTS="$ENV_SH $GENERATED_TARGET_SCRIPTS"
-        elif [ -n "$GENERATED_META_SCRIPTS" ]; then
-            GENERATED_META_SCRIPTS="$ENV_SH $GENERATED_META_SCRIPTS"
         fi
     fi
 }
@@ -2110,7 +2485,7 @@ generate_grants_and_synonyms_scripts() {
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 500 TRIMSPOOL ON SERVEROUTPUT ON
 SPOOL 99_post_grants_synonyms_${UNIQUE_ID}.log
 
-$PDB_SWITCH_SQL
+$(emit_tgt_container_block)
 
 PROMPT ========================================================================
 PROMPT 1. Creating/Recreating Public Synonyms
@@ -2206,26 +2581,32 @@ SPOOL OFF
 EXIT;
 EOF
 
-        cat <<EOF > "$DEP_SH"
-#!/bin/bash
-export ORACLE_HOME=$ORACLE_HOME
-export ORACLE_SID=$ORACLE_SID
-export PATH=\$ORACLE_HOME/bin:\$PATH
-export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
-EOF
+        # [FIX v09.03.01] (B1) 래퍼의 환경/접속은 생성 위치에 따라 다르게 박는다.
+        # [FIX v09.03.01] (B8) 결과 판정 추가. GRANT / SYNONYM 실패는 대상 객체나
+        #   계정이 Target 에 없다는 뜻이므로 허용 목록 없이 실패로 끝낸다.
+        emit_tgt_wrapper_header "$DEP_SH"
         generate_run_prompt "$DEP_SH" "후행 권한(Grants) 및 Public Synonym DDL 적용"
         cat <<EOF >> "$DEP_SH"
 echo ">> Target DB에 후행 권한(Grants) 및 Public Synonym DDL을 적용합니다..."
+rm -f "99_post_grants_synonyms_${UNIQUE_ID}.log"
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+WHENEVER SQLERROR EXIT FAILURE
+$(tgt_wrapper_connect_line)
+WHENEVER SQLERROR CONTINUE
 @$DEP_SQL
 CONNECT_EOF
 EOF
+        emit_sql_result_check "$DEP_SH" "99_post_grants_synonyms_${UNIQUE_ID}.log" \
+            "" "후행 권한(Grants) 및 Public Synonym DDL 적용"
         chmod 700 "$DEP_SH"
-        if [ -n "$GENERATED_TARGET_SCRIPTS" ]; then
+
+        # [FIX v09.03.01] (B1) Source 모드에서는 어느 파이프라인에도 넣지 않는다.
+        #   v09.03.00 까지는 GENERATED_EXEC_SCRIPTS 뒤에 붙어, Source 마스터 러너가
+        #   expdp 직후 Target 용 GRANT/SYNONYM 을 Source DB 에 실행했다.
+        if [ "$GEN_ROLE" = "SOURCE" ]; then
+            GENERATED_FOR_TARGET_SCRIPTS="$GENERATED_FOR_TARGET_SCRIPTS $DEP_SH"
+        else
             GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $DEP_SH"
-        elif [ -n "$GENERATED_EXEC_SCRIPTS" ]; then
-            GENERATED_EXEC_SCRIPTS="$GENERATED_EXEC_SCRIPTS $DEP_SH"
         fi
     fi
 }
@@ -2528,6 +2909,14 @@ echo "\$FROM_STEP" | grep -qE '^[0-9]+\$' || FROM_STEP=1
 
 touch "\$STATE_FILE" 2>/dev/null
 
+# [FIX v09.03.01] 스텝 스크립트의 개별 실행 확인을 끈다. 실행 여부는 마스터가 이미
+#   정했다(대화형이면 스텝마다 묻고, -y 면 묻지 않는다). 예전에는 -y 로 돌려도 스텝마다
+#   확인 질문이 떴고, 두 번째 질문의 기본값(N)이 exit 0 이라 실행하지 않은 스텝이
+#   [PASS] + DONE 으로 기록되어 --resume 때 영원히 건너뛰어졌다.
+export MIG_NONINTERACTIVE=1
+# 스텝이 75 로 끝나면 "사용자가 실행을 보류함" 이다. 성공(DONE)으로 남기지 않는다.
+RC_USER_SKIPPED=75
+
 log_msg() {
     echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" | tee -a "\$MASTER_LOG"
 }
@@ -2627,6 +3016,7 @@ for s_file in \$STEP_LIST; do
         step_end=\$(date +%s 2>/dev/null || echo 0)
         step_duration=\$((step_end - step_start))
         [ \$step_rc -eq 0 ] && break
+        [ \$step_rc -eq \$RC_USER_SKIPPED ] && break
         _attempt=\$((_attempt + 1))
         [ \$_attempt -le \$MAX_RETRY ] && sleep 5
     done
@@ -2634,6 +3024,10 @@ for s_file in \$STEP_LIST; do
     if [ \$step_rc -eq 0 ]; then
         log_msg ">> [PASS] \$s_file completed successfully (Elapsed: \${step_duration}s)"
         mark_done "\$s_file"
+    elif [ \$step_rc -eq \$RC_USER_SKIPPED ]; then
+        # 실행하지 않았으므로 DONE 을 남기지 않는다 -> --resume 때 다시 실행 대상이 된다.
+        log_msg ">> [SKIP-USER] \$s_file : 사용자가 실행을 보류했습니다 (체크포인트 미기록)"
+        skipped_steps=\$((skipped_steps + 1))
     else
         failed_steps=\$((failed_steps + 1))
         log_msg ">> [FAIL] \$s_file exited with return code: \$step_rc"
@@ -3133,6 +3527,8 @@ run_source_mode() {
     # [FIX v07/B2] 메인 메뉴 루프에서 재진입할 때 이전 실행의 스크립트 목록이
     #              누적/재실행되지 않도록 관련 전역 변수를 모두 초기화한다.
     reset_generation_state
+    # [FIX v09.03.01] (B1) 공용 생성 함수(Target 환경 DDL / 권한)가 Source 쪽 생성임을 알게 한다.
+    GEN_ROLE="SOURCE"
     clear_screen
     echo "======================================================================"
     if [ "$LANG_PREF" = "EN" ]; then echo " [1] SOURCE SERVER: Check Resources & Generate expdp Scripts"
@@ -3706,7 +4102,9 @@ EOF
         
         echo "  * 생성 중: $STATS_SQL, $STATS_SH 및 $STATS_PAR"
         
+        # [FIX v09.03.01] (B8) 통계 추출이 실패하면 sqlplus 가 비0 으로 끝나게 한다.
         cat <<EOF > "$STATS_SQL"
+WHENEVER SQLERROR EXIT FAILURE
 $PDB_SWITCH_SQL
 BEGIN
   BEGIN
@@ -3770,17 +4168,27 @@ export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 EOF
         generate_run_prompt "$STATS_SH" "DBMS_STATS 통계정보 추출(SQL) 및 통계테이블 expdp"
+        # [FIX v09.03.01] (B8) 예전에는 마지막 명령(임시 테이블 DROP)의 종료코드가 곧
+        #   스크립트의 종료코드라, 통계 추출이나 expdp 가 실패해도 0 으로 끝났다.
+        #   두 단계의 종료코드를 보존해 마지막에 반영한다. 임시 테이블 정리는 항상 한다.
         cat <<EOF >> "$STATS_SH"
 echo ">> DBMS_STATS 통계정보를 Stat Table에 담는 중입니다..."
 sqlplus -S /nolog <<CONNECT_EOF
+WHENEVER SQLERROR EXIT FAILURE
 connect $DB_CONN
 @$STATS_SQL
 CONNECT_EOF
- 
-echo ">> Stat Table 백업을 위해 expdp를 실행합니다..."
-expdp PARFILE=$STATS_PAR
+_rc_sql=\$?
+_rc_exp=0
+if [ "\$_rc_sql" -ne 0 ]; then
+    echo ">> [실패] 통계 추출 SQL 이 실패했습니다 (sqlplus exit=\$_rc_sql). expdp 를 건너뜁니다."
+else
+    echo ">> Stat Table 백업을 위해 expdp를 실행합니다..."
+    expdp PARFILE=$STATS_PAR
+    _rc_exp=\$?
+fi
 
-echo ">> Export 완료 후 임시 통계 테이블(${STAT_OWN}.${STAT_TAB})을 삭제합니다..."
+echo ">> 임시 통계 테이블(${STAT_OWN}.${STAT_TAB})을 삭제합니다..."
 sqlplus -S /nolog <<SQL_EOF
 connect $DB_CONN
 $PDB_SWITCH_SQL
@@ -3791,6 +4199,13 @@ END;
 /
 EXIT;
 SQL_EOF
+
+if [ "\$_rc_sql" -ne 0 ]; then exit "\$_rc_sql"; fi
+if [ "\$_rc_exp" -ne 0 ]; then
+    echo ">> [실패] 통계 테이블 expdp 가 실패했습니다 (exit=\$_rc_exp). 로그: ${UNIQUE_ID}_expdp_stats.log"
+    exit "\$_rc_exp"
+fi
+echo ">> [완료] 통계 추출 및 expdp"
 EOF
         chmod 700 "$STATS_SH"; chmod 600 "$STATS_PAR" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
         GENERATED_STATS_SCRIPTS="$STATS_SH"
@@ -3888,8 +4303,17 @@ if [ -f "\$SRC_DIR/${UNIQUE_ID}_dumpfiles.md5" ]; then
     log ">> 원격 서버에서 체크섬 무결성 검증을 시도합니다..."
     if scp -p "./checksum_verify_${UNIQUE_ID}.sh" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" 2>/dev/null; then
         ssh "\${TGT_USER}@\${TGT_IP}" "bash \${TGT_PATH}/checksum_verify_${UNIQUE_ID}.sh \${TGT_PATH}" 2>&1 | tee -a "\$XFER_LOG"
+        # [FIX v09.03.01] (B8) 파이프의 종료코드는 tee 의 것이라, 원격 검증이 불일치로
+        #   실패해도 이 스크립트는 0 으로 끝났다. ssh 쪽 종료코드를 직접 본다.
+        _vrc=\${PIPESTATUS[0]}
+        if [ "\$_vrc" -ne 0 ]; then
+            log ">> [FAIL] 원격 체크섬 검증이 실패했습니다 (exit=\$_vrc). impdp 를 진행하지 마시고 재전송하십시오."
+            exit 1
+        fi
+        log ">> [OK] 원격 체크섬 검증 통과"
     else
-        log "   [INFO] 검증 스크립트 전송 실패. Target 에서 수동으로 checksum_verify_${UNIQUE_ID}.sh 를 실행하십시오."
+        # 검증 자체를 못 한 경우다. Target 파이프라인 첫머리의 checksum_verify 단계가 다시 확인한다.
+        log "   [WARN] 검증 스크립트 전송 실패 - 원격 검증 미수행. Target 에서 checksum_verify_${UNIQUE_ID}.sh 를 반드시 실행하십시오."
     fi
 fi
 log ">> 전송 작업이 종료되었습니다. 로그: \$XFER_LOG"
@@ -3934,6 +4358,19 @@ EOF
     if [ -n "$GENERATED_UTIL_SCRIPTS" ]; then
         if [ "$LANG_PREF" = "EN" ]; then echo "  [Monitoring & Stop Utilities]"; else echo "  [모니터링 및 안전 중지 헬퍼 유틸리티]"; fi
         for gs in $GENERATED_UTIL_SCRIPTS; do echo "  * $gs"; done
+    fi
+    # [FIX v09.03.01] (B1) Target 에서 실행할 생성물은 Source 파이프라인에 넣지 않고 따로 안내한다.
+    if [ -n "$GENERATED_FOR_TARGET_SCRIPTS" ]; then
+        if [ "$LANG_PREF" = "EN" ]; then
+            echo "  [For the TARGET server - NOT part of this Source pipeline]"
+            echo "    Copy each .sh together with its .sql to the Target server and run it there."
+        else
+            echo "  [Target 서버용 - 이 Source 파이프라인에는 포함되지 않음]"
+            echo "    각 .sh 를 같은 이름의 .sql 과 함께 Target 서버로 복사해 그곳에서 실행하십시오."
+        fi
+        for gs in $GENERATED_FOR_TARGET_SCRIPTS; do echo "  * $gs  (+ $(echo "$gs" | sed 's/\.sh$/.sql/'))"; done
+        if [ "$LANG_PREF" = "EN" ]; then echo "    Target connection: MIG_TGT_CONN env var, or prompted at run time."
+        else echo "    Target 접속 계정은 MIG_TGT_CONN 환경변수 또는 실행 시 입력으로 받습니다."; fi
     fi
     echo "======================================================================"
 
@@ -4411,6 +4848,8 @@ run_target_mode() {
     # [v09.02] local 제거 (ksh 비호환): _fi _lf _src_ts_list _sts
     # [FIX v07/B2] 재진입 시 이전 실행 잔여 상태 제거 (v06 의 누적 실행 버그 수정)
     reset_generation_state
+    # [FIX v09.03.01] (B1) 공용 생성 함수가 Target 쪽 생성임을 알게 한다.
+    GEN_ROLE="TARGET"
     clear_screen
     echo "======================================================================"
     if [ "$LANG_PREF" = "EN" ]; then echo " [2] TARGET SERVER: Check Resources & Generate impdp Scripts"
@@ -5164,6 +5603,71 @@ EOF
     _read workflow_opt
     [ -z "$workflow_opt" ] && workflow_opt="2"
 
+    # ------------------------------------------------------------------
+    # [FIX v09.03.01] (B2) 단계별 분할 복구의 TABLE_EXISTS_ACTION 매핑
+    #
+    #   2단계는 CONTENT=DATA_ONLY 다. 여기에 SKIP 이 들어가면 1단계에서 방금 만든
+    #   테이블까지 "이미 존재" 로 보고 데이터를 전부 건너뛴다. v09.03.00 까지는
+    #   FULL 모드 기본값(1: SKIP)이 그대로 2단계 par 에 들어가 데이터가 0건 적재
+    #   되었고, impdp 는 정상 종료하므로 마스터 러너에는 [PASS] 로 남았다.
+    #   또 REPLACE 는 CONTENT=DATA_ONLY 와 함께 쓸 수 없다.
+    #
+    #   그래서 사용자의 선택을 단계별로 나눠 적용한다.
+    #     선택        1단계(METADATA_ONLY)   2단계(DATA_ONLY)
+    #     (지정 없음)  (기본 SKIP)            (기본 APPEND)     기존 동작 그대로
+    #     APPEND      SKIP                   APPEND
+    #     TRUNCATE    SKIP                   TRUNCATE
+    #     REPLACE     REPLACE                APPEND            1단계가 다시 만든 빈 테이블에 적재
+    #     SKIP        -- 분할로는 표현할 수 없음 --
+    #   SKIP 은 "기존 테이블은 건드리지 않고 새 테이블만 적재" 인데, 2단계 시점에는
+    #   새 테이블도 이미 존재하므로 둘을 가를 수 없다. 이 경우 통합 복구(1)로
+    #   바꾸거나(기본값), 의미가 달라지는 것을 알고 APPEND / TRUNCATE 를 고르게 한다.
+    # ------------------------------------------------------------------
+    TEA_P1_PARAM=""
+    TEA_P2_PARAM=""
+    if [ "$workflow_opt" = "2" ]; then
+        case "$TABLE_EXISTS_ACTION_PARAM" in
+            *=SKIP)
+                echo "----------------------------------------------------------------------"
+                if [ "$LANG_PREF" = "EN" ]; then
+                    echo "  [CAUTION] Step-by-step workflow cannot honor TABLE_EXISTS_ACTION=SKIP."
+                    echo "            Step 2 (CONTENT=DATA_ONLY) would treat the tables created in step 1"
+                    echo "            as 'already existing' and skip ALL data (0 rows loaded)."
+                    echo "   1) Switch to Full Integration workflow (1) - keeps SKIP semantics [Default]"
+                    echo "   2) Keep step-by-step, data step uses APPEND   (rows are added to pre-existing tables too)"
+                    echo "   3) Keep step-by-step, data step uses TRUNCATE (pre-existing tables are emptied first)"
+                    printf "  Select (1-3) [Default: 1]: "
+                else
+                    echo "  [주의] 단계별 분할 복구와 TABLE_EXISTS_ACTION=SKIP 은 함께 쓸 수 없습니다."
+                    echo "         2단계(DATA_ONLY)가 1단계에서 만든 테이블까지 '이미 존재'로 보고"
+                    echo "         데이터를 전부 건너뜁니다 (0건 적재)."
+                    echo "   1) 통합 복구(1)로 전환 - SKIP 의미 그대로 유지 [기본값]"
+                    echo "   2) 단계별 유지, 데이터 단계는 APPEND   (기존 테이블에도 행이 추가됨)"
+                    echo "   3) 단계별 유지, 데이터 단계는 TRUNCATE (기존 테이블의 데이터가 먼저 지워짐)"
+                    printf "  선택 (1-3) [기본값: 1]: "
+                fi
+                _read tea_split_opt
+                case "$tea_split_opt" in
+                    2) TABLE_EXISTS_ACTION_PARAM="TABLE_EXISTS_ACTION=APPEND" ;;
+                    3) TABLE_EXISTS_ACTION_PARAM="TABLE_EXISTS_ACTION=TRUNCATE" ;;
+                    *)
+                        workflow_opt="1"
+                        if [ "$LANG_PREF" = "EN" ]; then echo "  >> Switched to Full Integration workflow (TABLE_EXISTS_ACTION=SKIP kept)."
+                        else echo "  >> 통합 복구(1)로 전환합니다 (TABLE_EXISTS_ACTION=SKIP 유지)."; fi
+                        ;;
+                esac
+                ;;
+        esac
+    fi
+    if [ "$workflow_opt" = "2" ]; then
+        case "$TABLE_EXISTS_ACTION_PARAM" in
+            *=APPEND)   TEA_P1_PARAM="TABLE_EXISTS_ACTION=SKIP";    TEA_P2_PARAM="TABLE_EXISTS_ACTION=APPEND" ;;
+            *=TRUNCATE) TEA_P1_PARAM="TABLE_EXISTS_ACTION=SKIP";    TEA_P2_PARAM="TABLE_EXISTS_ACTION=TRUNCATE" ;;
+            *=REPLACE)  TEA_P1_PARAM="TABLE_EXISTS_ACTION=REPLACE"; TEA_P2_PARAM="TABLE_EXISTS_ACTION=APPEND" ;;
+            *)          TEA_P1_PARAM="";                            TEA_P2_PARAM="" ;;
+        esac
+    fi
+
     if [ "$workflow_opt" = "2" ]; then
         IMP_P1="impdp_1_table_meta_${UNIQUE_ID}.sh"
         IMP_P1_PAR="impdp_1_table_meta_${UNIQUE_ID}.par"
@@ -5188,7 +5692,8 @@ EOF
         if [ -n "$CLUSTER_PARAM" ]; then echo "$CLUSTER_PARAM" >> "$IMP_P1_PAR"; fi
         if [ -n "$IMP_SOURCE_PARAM" ]; then echo "$IMP_SOURCE_PARAM" >> "$IMP_P1_PAR"; fi
         # Notice: CONTENT=METADATA_ONLY 모드에서는 PARALLEL 제외 (ORA-39144 충돌 방지)
-        if [ -n "$TABLE_EXISTS_ACTION_PARAM" ]; then echo "$TABLE_EXISTS_ACTION_PARAM" >> "$IMP_P1_PAR"; fi
+        # [FIX v09.03.01] (B2) 단계별 매핑값을 쓴다 (위 매핑표 참조)
+        if [ -n "$TEA_P1_PARAM" ]; then echo "$TEA_P1_PARAM" >> "$IMP_P1_PAR"; fi
         if [ -n "$TDE_PARAM" ]; then echo "$TDE_PARAM" >> "$IMP_P1_PAR"; fi
 
         cat <<EOF > "$IMP_P1"
@@ -5212,59 +5717,132 @@ EOF
 
         echo "  * 생성 중: $DIS_SH 및 $ENA_SH (제약조건/트리거 비활성화 및 재활성화)"
 
+        # ------------------------------------------------------------------
+        # [FIX v09.03.01] (B4) FK / 트리거 조작 범위와 복원 방식
+        #
+        #   v09.03.00 까지:
+        #     - SYS/SYSTEM/XDB/WMSYS 만 빼고 DB 전체의 FK·트리거를 껐다.
+        #       (MDSYS·CTXSYS·LBACSYS 같은 내부 스키마와 다른 업무 스키마까지)
+        #     - 재활성화는 "지금 DISABLED 인 것 전부" 를 켰다. 이관 전부터 일부러
+        #       꺼 두었던 FK·트리거까지 켜졌다.
+        #     - 실패는 EXCEPTION WHEN OTHERS THEN NULL 로 전부 삼켰다.
+        #   지금:
+        #     - 범위를 이관 대상(REMAP 반영 후 이름)으로 한정하고 Oracle 내부 계정을 뺀다.
+        #     - 트리거는 테이블 트리거만 다룬다 (스키마/DB 레벨 트리거는 데이터 적재와 무관).
+        #     - 이 단계에서 "실제로 끈 것" 을 SYSTEM.MIG_DISABLED_OBJ 에 Job 단위로
+        #       기록하고, 2-1 단계는 그 기록에 있는 것만 되살린다.
+        #     - 실패는 건수로 집계해 보고하고 종료코드를 비0 으로 만든다.
+        # ------------------------------------------------------------------
+        _uid_sql=$(echo "$UNIQUE_ID" | sed "s/'/''/g")
+        _fk_scope=$(mig_scope_pred "owner" "table_name")
+        _trg_scope=$(mig_scope_pred "table_owner" "table_name")
+        _pdb_prompt_line=""
+        [ -n "$PDB_SWITCH_SQL" ] && _pdb_prompt_line="PROMPT $PDB_SWITCH_SQL"
+
         cat <<EOF > "$DIS_SQL"
-SET SERVEROUTPUT ON LINES 200
+SET SERVEROUTPUT ON SIZE UNLIMITED LINES 200
+WHENEVER SQLERROR EXIT FAILURE
+SPOOL impdp_1_1_disable_constraints_${UNIQUE_ID}.log
 $PDB_SWITCH_SQL
 PROMPT =======================================================================
-PROMPT Disabling Foreign Key Constraints and Triggers before Data Load...
+PROMPT Disabling FK constraints and table triggers before data load
+PROMPT  - scope : migration targets only (mode ${MIG_TYPE}, names after REMAP),
+PROMPT            Oracle internal schemas excluded
+PROMPT  - every object disabled here is recorded in SYSTEM.MIG_DISABLED_OBJ
+PROMPT    (job ${UNIQUE_ID}); step 2-1 re-enables exactly those objects
 PROMPT =======================================================================
-DECLARE
-  v_count NUMBER := 0;
+-- 기록 테이블. 이미 있으면(재실행 / 다른 Job) 그대로 쓴다.
 BEGIN
-  FOR r IN (
-    SELECT table_name, constraint_name, owner 
-    FROM dba_constraints 
-    WHERE constraint_type = 'R' AND status = 'ENABLED' AND owner NOT IN ('SYS','SYSTEM','XDB','WMSYS')
-  ) LOOP
-    BEGIN
-      EXECUTE IMMEDIATE 'ALTER TABLE "' || r.owner || '"."' || r.table_name || '" DISABLE CONSTRAINT "' || r.constraint_name || '"';
-      v_count := v_count + 1;
-    EXCEPTION WHEN OTHERS THEN NULL;
-    END;
-  END LOOP;
-  DBMS_OUTPUT.PUT_LINE('>> Disabled ' || v_count || ' Foreign Key constraints.');
-  
-  v_count := 0;
-  FOR r IN (
-    SELECT trigger_name, owner 
-    FROM dba_triggers 
-    WHERE status = 'ENABLED' AND owner NOT IN ('SYS','SYSTEM','XDB','WMSYS')
-  ) LOOP
-    BEGIN
-      EXECUTE IMMEDIATE 'ALTER TRIGGER "' || r.owner || '"."' || r.trigger_name || '" DISABLE';
-      v_count := v_count + 1;
-    EXCEPTION WHEN OTHERS THEN NULL;
-    END;
-  END LOOP;
-  DBMS_OUTPUT.PUT_LINE('>> Disabled ' || v_count || ' Triggers.');
+  EXECUTE IMMEDIATE 'CREATE TABLE SYSTEM.MIG_DISABLED_OBJ ('
+    || 'JOB_ID VARCHAR2(128), OBJ_TYPE VARCHAR2(10), OWNER VARCHAR2(128), '
+    || 'TABLE_NAME VARCHAR2(128), OBJ_NAME VARCHAR2(128), ORIG_VALIDATED VARCHAR2(20), '
+    || 'DISABLED_AT DATE, RESTORED_AT DATE)';
+EXCEPTION WHEN OTHERS THEN
+  IF SQLCODE <> -955 THEN RAISE; END IF;
 END;
 /
+
+DECLARE
+  v_fk_ok   NUMBER := 0;
+  v_fk_err  NUMBER := 0;
+  v_tr_ok   NUMBER := 0;
+  v_tr_err  NUMBER := 0;
+BEGIN
+  -- 먼저 기록하고 끈다. ALTER(DDL) 가 직전 INSERT 를 커밋하므로 "꺼졌는데 기록이
+  -- 없는" 상태가 생기지 않는다. 끄기에 실패하면 방금 넣은 기록을 지운다.
+  FOR r IN (
+    SELECT owner, table_name, constraint_name, validated
+      FROM dba_constraints
+     WHERE constraint_type = 'R'
+       AND status = 'ENABLED'
+       AND ${_fk_scope}
+  ) LOOP
+    BEGIN
+      INSERT INTO SYSTEM.MIG_DISABLED_OBJ
+        VALUES ('${_uid_sql}', 'FK', r.owner, r.table_name, r.constraint_name, r.validated, SYSDATE, NULL);
+      EXECUTE IMMEDIATE 'ALTER TABLE "' || r.owner || '"."' || r.table_name ||
+                        '" DISABLE CONSTRAINT "' || r.constraint_name || '"';
+      v_fk_ok := v_fk_ok + 1;
+    EXCEPTION WHEN OTHERS THEN
+      v_fk_err := v_fk_err + 1;
+      DBMS_OUTPUT.PUT_LINE('  [FK DISABLE FAILED] ' || r.owner || '.' || r.table_name ||
+                           ' (' || r.constraint_name || ') : ' || SUBSTR(SQLERRM, 1, 160));
+      DELETE FROM SYSTEM.MIG_DISABLED_OBJ
+       WHERE job_id = '${_uid_sql}' AND obj_type = 'FK' AND owner = r.owner
+         AND table_name = r.table_name AND obj_name = r.constraint_name
+         AND restored_at IS NULL;
+      COMMIT;
+    END;
+  END LOOP;
+
+  FOR r IN (
+    SELECT owner, trigger_name, table_name
+      FROM dba_triggers
+     WHERE status = 'ENABLED'
+       AND base_object_type = 'TABLE'
+       AND ${_trg_scope}
+  ) LOOP
+    BEGIN
+      INSERT INTO SYSTEM.MIG_DISABLED_OBJ
+        VALUES ('${_uid_sql}', 'TRIGGER', r.owner, r.table_name, r.trigger_name, NULL, SYSDATE, NULL);
+      EXECUTE IMMEDIATE 'ALTER TRIGGER "' || r.owner || '"."' || r.trigger_name || '" DISABLE';
+      v_tr_ok := v_tr_ok + 1;
+    EXCEPTION WHEN OTHERS THEN
+      v_tr_err := v_tr_err + 1;
+      DBMS_OUTPUT.PUT_LINE('  [TRIGGER DISABLE FAILED] ' || r.owner || '.' || r.trigger_name ||
+                           ' : ' || SUBSTR(SQLERRM, 1, 160));
+      DELETE FROM SYSTEM.MIG_DISABLED_OBJ
+       WHERE job_id = '${_uid_sql}' AND obj_type = 'TRIGGER' AND owner = r.owner
+         AND obj_name = r.trigger_name AND restored_at IS NULL;
+      COMMIT;
+    END;
+  END LOOP;
+
+  DBMS_OUTPUT.PUT_LINE('>> FK disabled       : ' || v_fk_ok || ' (failed ' || v_fk_err || ')');
+  DBMS_OUTPUT.PUT_LINE('>> Triggers disabled : ' || v_tr_ok || ' (failed ' || v_tr_err || ')');
+  IF v_fk_err + v_tr_err > 0 THEN
+    RAISE_APPLICATION_ERROR(-20931, 'Disable step incomplete: ' || (v_fk_err + v_tr_err) ||
+      ' object(s) failed. Objects already disabled are recorded and step 2-1 will restore them.');
+  END IF;
+END;
+/
+SPOOL OFF
 EXIT;
 EOF
 
-        cat <<EOF > "$DIS_SH"
-#!/bin/bash
-export ORACLE_HOME=$ORACLE_HOME
-export ORACLE_SID=$ORACLE_SID
-export PATH=\$ORACLE_HOME/bin:\$PATH
-export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+        emit_tgt_wrapper_header "$DIS_SH"
+        cat <<EOF >> "$DIS_SH"
 
-echo ">> 2단계 Data 임포트 전 FK 제약조건 및 Trigger를 비활성화합니다..."
+echo ">> 2단계 Data 임포트 전 FK 제약조건 및 Trigger를 비활성화합니다 (이관 대상 범위만)..."
+rm -f "impdp_1_1_disable_constraints_${UNIQUE_ID}.log"
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+WHENEVER SQLERROR EXIT FAILURE
+$(tgt_wrapper_connect_line)
 @$DIS_SQL
 CONNECT_EOF
 EOF
+        emit_sql_result_check "$DIS_SH" "impdp_1_1_disable_constraints_${UNIQUE_ID}.log" \
+            "" "FK/트리거 비활성화 (끈 목록: SYSTEM.MIG_DISABLED_OBJ, JOB_ID=${UNIQUE_ID})"
         chmod 700 "$DIS_SH"
         GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $DIS_SH"
 
@@ -5302,7 +5880,8 @@ EOF
                 echo "#   - 단일 대용량 테이블은 Dump File 방식이 더 빠릅니다."
             } >> "$IMP_P2_PAR"
         fi
-        if [ -n "$TABLE_EXISTS_ACTION_PARAM" ]; then echo "$TABLE_EXISTS_ACTION_PARAM" >> "$IMP_P2_PAR"; fi
+        # [FIX v09.03.01] (B2) 원래 선택값(SKIP 등)을 그대로 넣으면 데이터가 0건 적재된다.
+        if [ -n "$TEA_P2_PARAM" ]; then echo "$TEA_P2_PARAM" >> "$IMP_P2_PAR"; fi
         if [ -n "$TDE_PARAM" ]; then echo "$TDE_PARAM" >> "$IMP_P2_PAR"; fi
 
         cat <<EOF > "$IMP_P2"
@@ -5319,58 +5898,114 @@ EOF
         chmod 700 "$IMP_P2"; chmod 600 "$IMP_P2_PAR" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
         GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $IMP_P2"
 
+        # [FIX v09.03.01] (B4) 1-1 단계가 기록한 것만 되살린다. FK 는 빠르게 NOVALIDATE 로
+        #   켜고, 원래 VALIDATED 였던 FK 는 검증 복원 SQL 을 따로 만들어 둔다
+        #   (대용량 테이블 검증은 오래 걸리므로 작업 창을 골라 돌리게 한다).
+        VALFK_SQL="impdp_2_2_validate_fk_${UNIQUE_ID}.sql"
         cat <<EOF > "$ENA_SQL"
-SET SERVEROUTPUT ON LINES 200
+SET SERVEROUTPUT ON SIZE UNLIMITED LINES 200
+WHENEVER SQLERROR EXIT FAILURE
+SPOOL impdp_2_1_enable_constraints_${UNIQUE_ID}.log
 $PDB_SWITCH_SQL
 PROMPT =======================================================================
-PROMPT Re-enabling Foreign Key Constraints (NOVALIDATE) and Triggers...
+PROMPT Re-enabling only the FK constraints / triggers disabled by step 1-1
+PROMPT  (source of truth: SYSTEM.MIG_DISABLED_OBJ, job ${UNIQUE_ID})
 PROMPT =======================================================================
-DECLARE
-  v_count NUMBER := 0;
+-- 1-1 단계를 건너뛴 경우에도 실패하지 않도록 기록 테이블을 보장한다 (되살릴 것 0건).
 BEGIN
-  FOR r IN (
-    SELECT table_name, constraint_name, owner 
-    FROM dba_constraints 
-    WHERE constraint_type = 'R' AND status = 'DISABLED' AND owner NOT IN ('SYS','SYSTEM','XDB','WMSYS')
-  ) LOOP
-    BEGIN
-      EXECUTE IMMEDIATE 'ALTER TABLE "' || r.owner || '"."' || r.table_name || '" ENABLE NOVALIDATE CONSTRAINT "' || r.constraint_name || '"';
-      v_count := v_count + 1;
-    EXCEPTION WHEN OTHERS THEN NULL;
-    END;
-  END LOOP;
-  DBMS_OUTPUT.PUT_LINE('>> Enabled (NOVALIDATE) ' || v_count || ' Foreign Key constraints.');
-  
-  v_count := 0;
-  FOR r IN (
-    SELECT trigger_name, owner 
-    FROM dba_triggers 
-    WHERE status = 'DISABLED' AND owner NOT IN ('SYS','SYSTEM','XDB','WMSYS')
-  ) LOOP
-    BEGIN
-      EXECUTE IMMEDIATE 'ALTER TRIGGER "' || r.owner || '"."' || r.trigger_name || '" ENABLE';
-      v_count := v_count + 1;
-    EXCEPTION WHEN OTHERS THEN NULL;
-    END;
-  END LOOP;
-  DBMS_OUTPUT.PUT_LINE('>> Enabled ' || v_count || ' Triggers.');
+  EXECUTE IMMEDIATE 'CREATE TABLE SYSTEM.MIG_DISABLED_OBJ ('
+    || 'JOB_ID VARCHAR2(128), OBJ_TYPE VARCHAR2(10), OWNER VARCHAR2(128), '
+    || 'TABLE_NAME VARCHAR2(128), OBJ_NAME VARCHAR2(128), ORIG_VALIDATED VARCHAR2(20), '
+    || 'DISABLED_AT DATE, RESTORED_AT DATE)';
+EXCEPTION WHEN OTHERS THEN
+  IF SQLCODE <> -955 THEN RAISE; END IF;
 END;
 /
+VARIABLE v_fail NUMBER
+DECLARE
+  v_ok   NUMBER := 0;
+  v_err  NUMBER := 0;
+  v_val  NUMBER := 0;
+BEGIN
+  FOR r IN (
+    SELECT ROWID AS rid, obj_type, owner, table_name, obj_name, orig_validated
+      FROM SYSTEM.MIG_DISABLED_OBJ
+     WHERE job_id = '${_uid_sql}' AND restored_at IS NULL
+     ORDER BY DECODE(obj_type, 'FK', 1, 2), owner, table_name, obj_name
+  ) LOOP
+    BEGIN
+      IF r.obj_type = 'FK' THEN
+        EXECUTE IMMEDIATE 'ALTER TABLE "' || r.owner || '"."' || r.table_name ||
+                          '" ENABLE NOVALIDATE CONSTRAINT "' || r.obj_name || '"';
+        IF r.orig_validated = 'VALIDATED' THEN v_val := v_val + 1; END IF;
+      ELSE
+        EXECUTE IMMEDIATE 'ALTER TRIGGER "' || r.owner || '"."' || r.obj_name || '" ENABLE';
+      END IF;
+      UPDATE SYSTEM.MIG_DISABLED_OBJ SET restored_at = SYSDATE WHERE ROWID = r.rid;
+      COMMIT;
+      v_ok := v_ok + 1;
+    EXCEPTION WHEN OTHERS THEN
+      v_err := v_err + 1;
+      DBMS_OUTPUT.PUT_LINE('  [RE-ENABLE FAILED] ' || r.obj_type || ' ' || r.owner || '.' ||
+                           r.obj_name || ' : ' || SUBSTR(SQLERRM, 1, 160));
+    END;
+  END LOOP;
+  DBMS_OUTPUT.PUT_LINE('>> Re-enabled : ' || v_ok || ' (failed ' || v_err || ')');
+  IF v_val > 0 THEN
+    DBMS_OUTPUT.PUT_LINE('>> ' || v_val || ' FK(s) were VALIDATED before step 1-1 and are now ENABLED NOVALIDATE.');
+    DBMS_OUTPUT.PUT_LINE('   Run ${VALFK_SQL} to restore the VALIDATED state.');
+  END IF;
+  :v_fail := v_err;
+END;
+/
+SPOOL OFF
+
+-- 원래 VALIDATED 였던 FK 의 검증 복원 SQL
+SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 1000 TRIMSPOOL ON
+SPOOL ${VALFK_SQL}
+PROMPT -- [v09.03.01] FK validation restore list (job ${UNIQUE_ID})
+PROMPT -- Step 2-1 re-enabled these constraints with NOVALIDATE. Running this file
+PROMPT -- restores their original VALIDATED state. Large tables can take a long time.
+${_pdb_prompt_line}
+PROMPT WHENEVER SQLERROR CONTINUE
+SELECT 'ALTER TABLE "' || owner || '"."' || table_name || '" MODIFY CONSTRAINT "' || obj_name || '" VALIDATE;'
+  FROM SYSTEM.MIG_DISABLED_OBJ
+ WHERE job_id = '${_uid_sql}' AND obj_type = 'FK'
+   AND orig_validated = 'VALIDATED' AND restored_at IS NOT NULL
+ ORDER BY owner, table_name, obj_name;
+PROMPT EXIT;
+SPOOL OFF
+
+SPOOL impdp_2_1_enable_constraints_${UNIQUE_ID}.log APPEND
+BEGIN
+  IF :v_fail > 0 THEN
+    RAISE_APPLICATION_ERROR(-20932, :v_fail || ' object(s) could not be re-enabled. ' ||
+      'Fix the cause and rerun this step - only the remaining ones are retried.');
+  END IF;
+END;
+/
+SPOOL OFF
 EXIT;
 EOF
 
-        cat <<EOF > "$ENA_SH"
-#!/bin/bash
-export ORACLE_HOME=$ORACLE_HOME
-export ORACLE_SID=$ORACLE_SID
-export PATH=\$ORACLE_HOME/bin:\$PATH
-export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+        emit_tgt_wrapper_header "$ENA_SH"
+        cat <<EOF >> "$ENA_SH"
 
-echo ">> 2단계 Data 임포트 완료 후 FK 제약조건 및 Trigger를 재활성화합니다..."
+echo ">> 2단계 Data 임포트 완료 후, 1-1 단계에서 끈 FK 제약조건 및 Trigger만 재활성화합니다..."
+rm -f "impdp_2_1_enable_constraints_${UNIQUE_ID}.log"
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+WHENEVER SQLERROR EXIT FAILURE
+$(tgt_wrapper_connect_line)
 @$ENA_SQL
 CONNECT_EOF
+EOF
+        emit_sql_result_check "$ENA_SH" "impdp_2_1_enable_constraints_${UNIQUE_ID}.log" \
+            "" "FK/트리거 재활성화 (1-1 단계에서 끈 것만)"
+        cat <<EOF >> "$ENA_SH"
+if grep -q 'MODIFY CONSTRAINT' "${VALFK_SQL}" 2>/dev/null; then
+    echo ">> 원래 VALIDATED 였던 FK 는 NOVALIDATE 로 켜져 있습니다."
+    echo ">> 검증 상태 복원: sqlplus <접속> @${VALFK_SQL}  (대용량은 작업 시간대에 실행 권장)"
+fi
 EOF
         chmod 700 "$ENA_SH"
         GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $ENA_SH"
@@ -5476,11 +6111,13 @@ EOF
 
         echo "  * 생성 중: $IMP_STATS_SQL, $IMP_STATS_SH 및 $IMP_STATS_PAR"
         
+        # [FIX v09.03.01] (B8) 통계 반영이 실패하면 sqlplus 가 비0 으로 끝나게 한다.
         cat <<EOF > "$IMP_STATS_SQL"
+WHENEVER SQLERROR EXIT FAILURE
 $PDB_SWITCH_SQL
 BEGIN
 EOF
-        
+
         if [ "$MIG_TYPE" = "FULL" ]; then
             echo "  DBMS_STATS.IMPORT_DATABASE_STATS(statown => '$STAT_OWN', stattab => '$STAT_TAB');" >> "$IMP_STATS_SQL"
         elif [ "$MIG_TYPE" = "SCHEMA" ]; then
@@ -5548,17 +6185,28 @@ export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 EOF
         generate_run_prompt "$IMP_STATS_SH" "DBMS_STATS 통계정보 테이블 impdp 및 적용(SQL)"
+        # [FIX v09.03.01] (B8) 예전에는 마지막 명령(임시 테이블 DROP)의 종료코드가 곧
+        #   스크립트의 종료코드라, impdp 나 통계 반영이 실패해도 0 으로 끝났다.
         cat <<EOF >> "$IMP_STATS_SH"
 echo ">> Stat Table을 임포트 중입니다..."
 impdp PARFILE=$IMP_STATS_PAR
-
-echo ">> DBMS_STATS 복원 스크립트를 실행하여 통계를 딕셔너리에 반영합니다..."
-sqlplus -S /nolog <<CONNECT_EOF
+_rc_imp=\$?
+_rc_sql=0
+if [ "\$_rc_imp" -ne 0 ]; then
+    echo ">> [실패] 통계 테이블 impdp 가 실패했습니다 (exit=\$_rc_imp). 통계 반영을 건너뜁니다."
+    echo ">>        로그: ${UNIQUE_ID}_impdp_stats.log"
+else
+    echo ">> DBMS_STATS 복원 스크립트를 실행하여 통계를 딕셔너리에 반영합니다..."
+    sqlplus -S /nolog <<CONNECT_EOF
+WHENEVER SQLERROR EXIT FAILURE
 connect $DB_CONN
 @$IMP_STATS_SQL
 CONNECT_EOF
+    _rc_sql=\$?
+    [ "\$_rc_sql" -ne 0 ] && echo ">> [실패] 통계 반영 SQL 이 실패했습니다 (sqlplus exit=\$_rc_sql)."
+fi
 
-echo ">> 통계 반영 완료 후 임시 통계 테이블(${STAT_OWN}.${STAT_TAB})을 삭제합니다..."
+echo ">> 임시 통계 테이블(${STAT_OWN}.${STAT_TAB})을 삭제합니다..."
 sqlplus -S /nolog <<SQL_EOF
 connect $DB_CONN
 $PDB_SWITCH_SQL
@@ -5569,6 +6217,10 @@ END;
 /
 EXIT;
 SQL_EOF
+
+if [ "\$_rc_imp" -ne 0 ]; then exit "\$_rc_imp"; fi
+if [ "\$_rc_sql" -ne 0 ]; then exit "\$_rc_sql"; fi
+echo ">> [완료] 통계 테이블 impdp 및 통계 반영"
 EOF
         chmod 700 "$IMP_STATS_SH"; chmod 600 "$IMP_STATS_PAR" 2>/dev/null   # [FIX v07/M1] par 내 TDE 패스워드 보호
         GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $IMP_STATS_SH"
@@ -5600,6 +6252,9 @@ $PDB_SWITCH_SQL
 PROMPT =======================================================================
 PROMPT Locking Table/Schema Optimizer Statistics...
 PROMPT =======================================================================
+WHENEVER SQLERROR EXIT FAILURE
+DECLARE
+  v_err NUMBER := 0;
 BEGIN
 EOF
 
@@ -5609,7 +6264,7 @@ EOF
     BEGIN
       DBMS_STATS.LOCK_SCHEMA_STATS(ownname => r.username);
       DBMS_OUTPUT.PUT_LINE('>> Locked Schema Stats: ' || r.username);
-    EXCEPTION WHEN OTHERS THEN NULL;
+    EXCEPTION WHEN OTHERS THEN v_err := v_err + 1; DBMS_OUTPUT.PUT_LINE('  [FAILED] ' || SUBSTR(SQLERRM, 1, 200));
     END;
   END LOOP;
 EOF
@@ -5624,7 +6279,7 @@ EOF
   BEGIN
     DBMS_STATS.LOCK_SCHEMA_STATS(ownname => '$target_sch');
     DBMS_OUTPUT.PUT_LINE('>> Locked Schema Stats: $target_sch');
-  EXCEPTION WHEN OTHERS THEN NULL;
+  EXCEPTION WHEN OTHERS THEN v_err := v_err + 1; DBMS_OUTPUT.PUT_LINE('  [FAILED] ' || SUBSTR(SQLERRM, 1, 200));
   END;
 EOF
         done
@@ -5643,7 +6298,7 @@ EOF
   BEGIN
     DBMS_STATS.LOCK_TABLE_STATS(ownname => '$target_sch', tabname => '$target_tbl');
     DBMS_OUTPUT.PUT_LINE('>> Locked Table Stats: ${target_sch}.${target_tbl}');
-  EXCEPTION WHEN OTHERS THEN NULL;
+  EXCEPTION WHEN OTHERS THEN v_err := v_err + 1; DBMS_OUTPUT.PUT_LINE('  [FAILED] ' || SUBSTR(SQLERRM, 1, 200));
   END;
 EOF
         done
@@ -5654,13 +6309,16 @@ EOF
     BEGIN
       DBMS_STATS.LOCK_TABLE_STATS(ownname => r.owner, tabname => r.table_name);
       DBMS_OUTPUT.PUT_LINE('>> Locked Table Stats: ' || r.owner || '.' || r.table_name);
-    EXCEPTION WHEN OTHERS THEN NULL;
+    EXCEPTION WHEN OTHERS THEN v_err := v_err + 1; DBMS_OUTPUT.PUT_LINE('  [FAILED] ' || SUBSTR(SQLERRM, 1, 200));
     END;
   END LOOP;
 EOF
     fi
 
     cat <<EOF >> "$LOCK_SQL"
+  IF v_err > 0 THEN
+    RAISE_APPLICATION_ERROR(-20933, v_err || ' statistics lock operation(s) failed - see the log above.');
+  END IF;
 END;
 /
 SPOOL OFF
@@ -5677,11 +6335,15 @@ EOF
     generate_run_prompt "$LOCK_SH" "Target DB 이관 객체 통계 잠금(Lock Table Stats) 적용"
     cat <<EOF >> "$LOCK_SH"
 echo ">> Target DB Optimizer 통계 잠금을 실행합니다 (야간 Auto Task 변경 차단)..."
+rm -f "lock_stats_${UNIQUE_ID}.log"
 sqlplus -S /nolog <<CONNECT_EOF
+WHENEVER SQLERROR EXIT FAILURE
 connect $DB_CONN
 @$LOCK_SQL
 CONNECT_EOF
 EOF
+    # [FIX v09.03.01] (B8) 예전에는 실패를 EXCEPTION WHEN OTHERS THEN NULL 로 삼키고 항상 0 으로 끝났다.
+    emit_sql_result_check "$LOCK_SH" "lock_stats_${UNIQUE_ID}.log" "" "통계 잠금(Lock)"
     chmod 700 "$LOCK_SH"
     GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $LOCK_SH"
 
@@ -5698,6 +6360,9 @@ $PDB_SWITCH_SQL
 PROMPT =======================================================================
 PROMPT Unlocking Table/Schema Optimizer Statistics...
 PROMPT =======================================================================
+WHENEVER SQLERROR EXIT FAILURE
+DECLARE
+  v_err NUMBER := 0;
 BEGIN
 EOF
     if [ "$MIG_TYPE" = "FULL" ]; then
@@ -5706,7 +6371,7 @@ EOF
     BEGIN
       DBMS_STATS.UNLOCK_SCHEMA_STATS(ownname => r.username);
       DBMS_OUTPUT.PUT_LINE('>> Unlocked Schema Stats: ' || r.username);
-    EXCEPTION WHEN OTHERS THEN NULL;
+    EXCEPTION WHEN OTHERS THEN v_err := v_err + 1; DBMS_OUTPUT.PUT_LINE('  [FAILED] ' || SUBSTR(SQLERRM, 1, 200));
     END;
   END LOOP;
 EOF
@@ -5721,7 +6386,7 @@ EOF
   BEGIN
     DBMS_STATS.UNLOCK_SCHEMA_STATS(ownname => '$target_sch');
     DBMS_OUTPUT.PUT_LINE('>> Unlocked Schema Stats: $target_sch');
-  EXCEPTION WHEN OTHERS THEN NULL;
+  EXCEPTION WHEN OTHERS THEN v_err := v_err + 1; DBMS_OUTPUT.PUT_LINE('  [FAILED] ' || SUBSTR(SQLERRM, 1, 200));
   END;
 EOF
         done
@@ -5740,7 +6405,7 @@ EOF
   BEGIN
     DBMS_STATS.UNLOCK_TABLE_STATS(ownname => '$target_sch', tabname => '$target_tbl');
     DBMS_OUTPUT.PUT_LINE('>> Unlocked Table Stats: ${target_sch}.${target_tbl}');
-  EXCEPTION WHEN OTHERS THEN NULL;
+  EXCEPTION WHEN OTHERS THEN v_err := v_err + 1; DBMS_OUTPUT.PUT_LINE('  [FAILED] ' || SUBSTR(SQLERRM, 1, 200));
   END;
 EOF
         done
@@ -5751,13 +6416,16 @@ EOF
     BEGIN
       DBMS_STATS.UNLOCK_TABLE_STATS(ownname => r.owner, tabname => r.table_name);
       DBMS_OUTPUT.PUT_LINE('>> Unlocked Table Stats: ' || r.owner || '.' || r.table_name);
-    EXCEPTION WHEN OTHERS THEN NULL;
+    EXCEPTION WHEN OTHERS THEN v_err := v_err + 1; DBMS_OUTPUT.PUT_LINE('  [FAILED] ' || SUBSTR(SQLERRM, 1, 200));
     END;
   END LOOP;
 EOF
     fi
 
     cat <<EOF >> "$UNLOCK_SQL"
+  IF v_err > 0 THEN
+    RAISE_APPLICATION_ERROR(-20934, v_err || ' statistics unlock operation(s) failed - see the log above.');
+  END IF;
 END;
 /
 SPOOL OFF
@@ -5774,11 +6442,14 @@ EOF
     generate_run_prompt "$UNLOCK_SH" "Target DB 이관 객체 통계 잠금 해제(Unlock Table Stats)"
     cat <<EOF >> "$UNLOCK_SH"
 echo ">> Target DB Optimizer 통계 잠금을 해제합니다..."
+rm -f "unlock_stats_${UNIQUE_ID}.log"
 sqlplus -S /nolog <<CONNECT_EOF
+WHENEVER SQLERROR EXIT FAILURE
 connect $DB_CONN
 @$UNLOCK_SQL
 CONNECT_EOF
 EOF
+    emit_sql_result_check "$UNLOCK_SH" "unlock_stats_${UNIQUE_ID}.log" "" "통계 잠금 해제(Unlock)"
     chmod 700 "$UNLOCK_SH"
     GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $UNLOCK_SH"
 
@@ -5857,6 +6528,14 @@ export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
+# [FIX v09.03.01] (B10) 아래 [3/3] 로그 대조가 쓰는 값.
+#   v09.03.00 까지는 이 두 줄이 없어서 경로가 "/_expdp_*.log" 로 펼쳐졌고,
+#   로그 대조가 매번 "로그 없음" 으로 조용히 건너뛰어졌다.
+DIR_PHYSICAL_PATH=$(sh_quote "$DIR_PHYSICAL_PATH")
+UNIQUE_ID=$(sh_quote "$UNIQUE_ID")
+IMPORT_METHOD=$(sh_quote "$IMPORT_METHOD")
+_val_rc=0
+
 echo ">> [1/3] Invalid Object 자동 재컴파일을 수행합니다 (utlrp.sql)..."
 sqlplus -S /nolog <<SQL_EOF
 connect $DB_CONN
@@ -5891,8 +6570,19 @@ for _l in "\${DIR_PHYSICAL_PATH}"/\${UNIQUE_ID}_impdp_*.log; do
 done
 
 if [ ! -s "\$exp_list" ] || [ ! -s "\$imp_list" ]; then
+    _no_exp=0; [ -s "\$exp_list" ] || _no_exp=1
+    _no_imp=0; [ -s "\$imp_list" ] || _no_imp=1
     rm -f "\$exp_list" "\$imp_list"
-    echo "  [INFO] expdp 또는 impdp 로그 파일을 찾을 수 없어 Row Count 검증을 건너뜁니다."
+    if [ "\$IMPORT_METHOD" = "NETWORK_LINK" ]; then
+        echo "  [INFO] NETWORK_LINK 모드는 expdp 로그가 없어 로그 기반 대조 대상이 아닙니다."
+        echo "         실측 건수 대조는 메뉴 7-3 (ROW COUNT) 을 사용하십시오."
+    else
+        echo "  [경고] 로그 기반 Row Count 대조를 수행하지 못했습니다 (미검증)."
+        [ "\$_no_exp" = "1" ] && echo "         - expdp 로그 없음: \${DIR_PHYSICAL_PATH}/\${UNIQUE_ID}_expdp_*.log"
+        [ "\$_no_imp" = "1" ] && echo "         - impdp 로그 없음: \${DIR_PHYSICAL_PATH}/\${UNIQUE_ID}_impdp_*.log"
+        echo "         Source 의 expdp 로그를 위 경로로 복사한 뒤 이 스크립트를 다시 실행하거나,"
+        echo "         메뉴 7-3 (ROW COUNT) 으로 실측 대조하십시오."
+    fi
 else
     exp_tmp="val_exp_rows_\$\$.tmp"
     imp_tmp="val_imp_rows_\$\$.tmp"
@@ -5947,9 +6637,12 @@ else
         echo "  >> [SUCCESS] \${matches}개 테이블 건수가 완전히 일치합니다!"
     else
         echo "  >> [WARNING] \${mismatches}건의 불일치/누락 항목이 검출되었습니다."
+        # [FIX v09.03.01] (B8) 불일치를 검출해도 0 으로 끝나 마스터 러너에 [PASS] 로 남았다.
+        _val_rc=1
     fi
     rm -f \$exp_tmp \$imp_tmp "\$exp_list" "\$imp_list"
 fi
+exit \$_val_rc
 EOF
         chmod 700 "$VAL_SH"
         GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $VAL_SH"
