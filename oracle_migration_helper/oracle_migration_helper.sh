@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.03.01 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.03.02 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -100,8 +100,29 @@
 #            (B8)  실패가 성공으로 보고되던 문제. 통계 export/import, 원격 체크섬,
 #                  계정·권한·FK·통계잠금 래퍼에 종료코드 + 스풀 로그 판정 추가
 #        - [v09.03.01] 버전 표기 통일 (헤더 / SCRIPT_VERSION / 파일명)
-#        - 알려진 미해결 — 2차 이후: E1(비밀번호 $) E2(30자) E3(Target 파이프라인
-#          순서: 계정/TBS DDL 이 PDB 생성보다 앞) 외. 1차 우선순위표 참조
+#        - [FIX v09.03.02] 2차 수정 — P1 19건
+#            (E1)  생성 스크립트 안 접속 문자열의 \ $ ` 이스케이프 (pa$$w0rd 가 PID 로 바뀌던 문제)
+#            (E2)  작업 ID 검증(영문 시작, 12.1 이하 20자)과 짧은 기본값, 개별 export JOB_NAME
+#                  을 B1/B2../G 태그로 — 11g/12.1 의 30자 식별자 제한 초과 방지
+#            (E3)  Target 파이프라인 순서를 한 곳에서 명시 (덤프 검증 -> PDB -> 계정/TBS -> ...)
+#            (B3)  통계 Unlock 을 파이프라인에서 빼고 유틸로 (Lock 직후 바로 풀리던 문제)
+#            (B9)  Target 모드 계정/권한 DDL 을 Source 딕셔너리(DB Link)에서 생성, 링크가
+#                  없으면 생성 생략. 딕셔너리 조회 오류가 생성 SQL 에 섞이지 않게 차단
+#            (B11) DB 에서 읽는 값을 VAL: 마커로 파싱 (오류 메시지 숫자를 값으로 읽던 문제)
+#            (B13) NETWORK_LINK Export 의 FLASHBACK_SCN 을 원격 DB 에서 조회
+#            (E11) 충돌 검사의 대상 목록을 줄 단위로 넘김(2499자 제한), 조회 실패는 "확인 실패"
+#            (E4)  비OMF PDB 생성 DDL — 실행 시 PDB\$SEED 경로를 찾아 입력 디렉토리로 변환
+#            (E8)  Resume 의 STOP/KILL 확인 응답(yes), ATTACH=소유자.Job
+#            (E9)  ROWCOUNT/HASH 스크립트가 실행 쪽(AS/TO)에 맞는 접속/SID/PDB 를 쓰도록
+#                  (AS: MIG_AS_CONN / MIG_AS_PDB), prep 래퍼(.sh) 추가
+#            (E12) DIRECTORY 권한은 ON DIRECTORY, DB Link 시노님은 @link 유지
+#            (E13) Target 사전 DDL 은 PERMANENT 테이블스페이스만
+#            (B12) 버전 비교를 major.minor 로 (12.2 -> 12.1 등 VERSION= 누락)
+#            (B14) NETWORK_LINK 사전점검 TABLESPACE 모드 LONG 검사 대상 정정
+#            (B15) DB Link 존재 확인 공통화 (도메인 접미사 / MIG_LINK2 오인 / 실패 무시)
+#            (B21) 시퀀스 동기화를 Source 값 기준으로 (내부 스키마·IDENTITY·감소 시퀀스 제외)
+#            (B22) 튜닝 원복을 적용 직전 실제 값으로, 올리기만 함, RAC SID='*'
+#            (B18) DB Link 청크 복사 — 구간 겹침(중복 복사) / NULL 행 누락 / SELECT * 정정
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -117,7 +138,7 @@
 # ==============================================================================
 
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.03.01"
+SCRIPT_VERSION="09.03.02"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -443,12 +464,65 @@ to_num() {
 }
 
 # ------------------------------------------------------------------------------
+# [FIX v09.03.02] (B11) sqlplus 결과에서 값만 정확히 뽑는다.
+#   to_num 은 출력의 숫자를 전부 이어 붙이므로, "ORA-01017: ..." 같은 오류가 오면
+#   1017 을 값으로 읽었다 (DB Link 가 '있다' 고 오판, 용량 1017 바이트로 PASS 등).
+#   DB 에서 읽는 값은 SELECT 'VAL:' || ... 로 표시하고 그 줄만 읽는다.
+#   sql_val <sqlplus 출력>  ->  숫자 (VAL: 줄이 없으면 빈 값 = 조회 실패)
+# ------------------------------------------------------------------------------
+sql_val() {
+    echo "$1" | sed -n 's/^[[:space:]]*VAL:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' | head -n 1
+}
+
+# ------------------------------------------------------------------------------
 # [FIX v09.03.01] 생성 스크립트에 셸 값을 그대로 박아 넣기 위한 인용
 #   값 전체를 작은따옴표로 감싸고, 값 안의 ' 는 '\'' 로 바꾼다.
 #     /backup/my dumps  ->  '/backup/my dumps'
 # ------------------------------------------------------------------------------
 sh_quote() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.02] (E1) 생성 스크립트의 "따옴표 없는 heredoc / 큰따옴표" 안에 값을 넣을 때
+#   \ $ ` 를 이스케이프한다. 생성 스크립트가 실행될 때 셸이 그 안을 한 번 더 해석하므로,
+#   그대로 넣으면 비밀번호 pa$$w0rd 가 pa<PID>w0rd 로 바뀌어 ORA-01017 로 실패했다.
+#   (도구가 직접 실행하는 sqlplus 에는 쓰지 않는다 — 그쪽은 값이 다시 해석되지 않는다)
+# ------------------------------------------------------------------------------
+hd_esc() {
+    printf '%s' "$1" | sed 's/[\\$`]/\\&/g'
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.02] (E2) 이관 작업 ID 검증
+#   normalize_unique_id <입력> [keepcase]   -> 정상이면 ID 를 출력, 아니면 1 반환
+#   - 공백은 _ 로, 기본은 대문자화 (Target 은 Source 가 만든 파일명과 맞춰야 하므로 keepcase)
+#   - 영문자로 시작, 영문/숫자/_ 만 허용 (JOB_NAME / 테이블명 / 파일명에 그대로 쓰인다)
+#   - 길이: 11g / 12.1 은 식별자가 30자라 접미사(_META_CUS, MIG_STAT_ 등 최대 9자)를
+#     고려해 20자, 12.2 이상은 100자
+# ------------------------------------------------------------------------------
+normalize_unique_id() {
+    _nu=$(echo "$1" | awk '{$1=$1;print}' | tr ' ' '_')
+    [ "$2" = "keepcase" ] || _nu=$(echo "$_nu" | tr '[:lower:]' '[:upper:]')
+    _nu_major=$(echo "$DB_VERSION" | cut -d'.' -f1 | tr -dc '0-9')
+    _nu_minor=$(echo "$DB_VERSION" | cut -d'.' -f2 | tr -dc '0-9')
+    _nu_max=100
+    if [ -n "$_nu_major" ]; then
+        if [ "$_nu_major" -lt 12 ] || { [ "$_nu_major" -eq 12 ] && [ "${_nu_minor:-0}" -lt 2 ]; }; then
+            _nu_max=20
+        fi
+    fi
+    if ! echo "$_nu" | grep -qE '^[A-Za-z][A-Za-z0-9_]*$'; then
+        if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] ID must start with a letter and contain only letters, digits and _ : '$_nu'" >&2
+        else echo "  [오류] ID 는 영문자로 시작하고 영문/숫자/_ 만 쓸 수 있습니다: '$_nu'" >&2; fi
+        return 1
+    fi
+    if [ "${#_nu}" -gt "$_nu_max" ]; then
+        if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] ID is ${#_nu} chars; max ${_nu_max} for DB ${DB_VERSION} (30-char identifiers before 12.2)." >&2
+        else echo "  [오류] ID 가 ${#_nu}자입니다. DB ${DB_VERSION} 에서는 최대 ${_nu_max}자입니다 (12.2 미만은 식별자 30자 제한)." >&2; fi
+        return 1
+    fi
+    echo "$_nu"
 }
 
 # ------------------------------------------------------------------------------
@@ -661,6 +735,29 @@ is_secretish() {
 sql_define_off() {
     # 패스워드를 품은 생성 SQL 의 머리에 반드시 붙인다.
     echo "SET DEFINE OFF"
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.02] (B11/B15) DB Link 존재 확인
+#   dblink_count <이름>  -> 접속 계정이 쓸 수 있는(본인 소유 / PUBLIC) 링크 수. 실패 시 빈 값
+#   - 도메인이 붙은 이름(MIG_LINK.EXAMPLE.COM)도 같은 링크로 본다. 예전에는 정확히 같은
+#     이름만 찾아, 도메인 환경에서 "없음" 으로 판정하고 재생성하다 ORA-02011 로 멈췄다.
+#   - 예전 DEEP DIFF 쪽은 LIKE 'NAME%' 라서 MIG_LINK2 도 MIG_LINK 로 잡았다.
+#   - 결과는 VAL: 마커로 읽는다 (오류 메시지의 숫자를 개수로 읽지 않게).
+# ------------------------------------------------------------------------------
+dblink_count() {
+    _dlc_name=$(echo "$1" | tr '[:lower:]' '[:upper:]' | sed "s/'/''/g")
+    _dlc_out=$(sqlplus -S /nolog <<EOF 2>/dev/null
+connect $DB_CONN
+SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 200
+$PDB_SWITCH_SQL
+SELECT 'VAL:' || COUNT(*) FROM dba_db_links
+ WHERE (db_link = '${_dlc_name}' OR db_link LIKE REPLACE('${_dlc_name}', '_', '\_') || '.%' ESCAPE '\')
+   AND owner IN (USER, 'PUBLIC');
+EXIT;
+EOF
+)
+    sql_val "$_dlc_out"
 }
 
 # ------------------------------------------------------------------------------
@@ -1775,13 +1872,36 @@ EOF
             else printf "  PDB 데이터파일 저장 디렉토리 경로: "; fi
             _read pdb_df_dir
             [ -z "$pdb_df_dir" ] && pdb_df_dir="$DIR_PHYSICAL_PATH"
+            # ------------------------------------------------------------------
+            # [FIX v09.03.02] (E4) 비OMF 환경용 DDL
+            #   예전: DEFAULT TABLESPACE USERS DATAFILE SIZE 100M  (파일명 없음 -> OMF 에서만 동작)
+            #         FILE_NAME_CONVERT = ('pdbseed', '<PDB>')     (입력받은 경로는 쓰지 않음)
+            #   지금: 실행 시점에 PDB\$SEED 의 데이터파일 디렉토리를 찾아, 입력한 디렉토리로
+            #         바꾸는 FILE_NAME_CONVERT 를 만들고, 기본 테이블스페이스 파일도 그
+            #         디렉토리에 이름을 지정해 만든다. (ASM '+DG/...' 경로도 같은 방식)
+            #   동적 SQL 리터럴 안에 들어가므로 ' 는 '' 로 이중화한다.
+            # ------------------------------------------------------------------
+            _pdb_dir_sql=$(printf '%s' "$pdb_df_dir" | sed -e 's#/*$##' -e "s/'/''/g")
+            _pdb_pwd_sql=$(printf '%s' "$pdb_admin_pwd" | sed "s/'/''/g")
             cat <<EOF >> "$PDB_SQL"
-CREATE PLUGGABLE DATABASE ${user_pdb_name}
-  ADMIN USER ${pdb_admin_user} IDENTIFIED BY "${pdb_admin_pwd}"
-  ROLES = (DBA)
-  DEFAULT TABLESPACE USERS
-  DATAFILE SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED
-  FILE_NAME_CONVERT = ('pdbseed', '${user_pdb_name}');
+DECLARE
+  v_seed_dir VARCHAR2(1000);
+  v_ddl      VARCHAR2(4000);
+BEGIN
+  SELECT SUBSTR(name, 1, INSTR(name, '/', -1))
+    INTO v_seed_dir
+    FROM v\$datafile
+   WHERE con_id = 2 AND ROWNUM = 1;      -- con_id 2 = PDB\$SEED
+  v_ddl := 'CREATE PLUGGABLE DATABASE ${user_pdb_name}'
+        || ' ADMIN USER ${pdb_admin_user} IDENTIFIED BY "${_pdb_pwd_sql}"'
+        || ' ROLES = (DBA)'
+        || ' DEFAULT TABLESPACE USERS DATAFILE ''${_pdb_dir_sql}/users01.dbf'''
+        || ' SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED'
+        || ' FILE_NAME_CONVERT = (''' || v_seed_dir || ''', ''${_pdb_dir_sql}/'')';
+  DBMS_OUTPUT.PUT_LINE('PDB seed dir : ' || v_seed_dir || '  ->  ${_pdb_dir_sql}/');
+  EXECUTE IMMEDIATE v_ddl;
+END;
+/
 EOF
         fi
 
@@ -1816,7 +1936,7 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
 echo ">> Target Multitenant CDB에 신규 PDB(${user_pdb_name})를 생성하고 기동합니다..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$PDB_SQL
 CONNECT_EOF
 # [v09.02] SQL 측에 WHENEVER SQLERROR EXIT FAILURE 를 걸었으므로 종료코드로 판정한다.
@@ -2213,7 +2333,8 @@ tgt_wrapper_connect_line() {
         # 런타임 변수 — 값 속의 $ 는 다시 해석되지 않는다.
         echo 'connect $MIG_TGT_CONN'
     else
-        echo "connect $DB_CONN"
+        # [FIX v09.03.02] (E1) 생성 래퍼의 따옴표 없는 heredoc 안에 들어가므로 이스케이프
+        echo "connect $(hd_esc "$DB_CONN")"
     fi
 }
 
@@ -2232,6 +2353,24 @@ EOF
         echo "-- [Multitenant Mode] Switch session container to target PDB"
         echo "$PDB_SWITCH_SQL"
     fi
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.02] (B9) 딕셔너리에서 뽑은 DDL 을 생성 SQL 에 붙이기 전에 오류를 확인한다.
+#   gen_sql_append_checked <조회출력> <생성SQL> <설명>   -> 오류가 있으면 붙이지 않고 1
+# ------------------------------------------------------------------------------
+gen_sql_append_checked() {
+    _gs_out="$1"; _gs_dst="$2"; _gs_desc="$3"
+    if grep -qE 'ORA-[0-9]{5}|SP2-[0-9]{4}|PLS-[0-9]{5}' "$_gs_out" 2>/dev/null; then
+        if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] ${_gs_desc}: dictionary query failed. Nothing was generated."
+        else echo "  [오류] ${_gs_desc} 생성 중 딕셔너리 조회 오류가 났습니다. 생성물을 만들지 않습니다."; fi
+        grep -E 'ORA-[0-9]{5}|SP2-[0-9]{4}|PLS-[0-9]{5}' "$_gs_out" | head -n 5 | sed 's/^/         /'
+        rm -f "$_gs_out"
+        return 1
+    fi
+    cat "$_gs_out" >> "$_gs_dst"
+    rm -f "$_gs_out"
+    return 0
 }
 
 generate_target_env_ddl() {
@@ -2277,6 +2416,7 @@ PROMPT 1. Creating Tablespaces (Default size: 100M with AUTOEXTEND)
 PROMPT ========================================================================
 EOF
 
+        _gen_ok="true"
         if [ "$MOCK_MODE" = "true" ]; then
             # [FIX v09.03.01] (B5) MOCK 생성물도 실제 경로와 같은 형태로 만든다.
             #   (해시를 가져온 경우 / 못 가져와 임의 비밀번호 + 잠금으로 만드는 경우)
@@ -2360,7 +2500,10 @@ EOF
             # ------------------------------------------------------------------
             if [ -n "$DBLINK_SUFFIX" ]; then _env_use_meta="FALSE"; else _env_use_meta="TRUE"; fi
 
-            sqlplus -S /nolog <<SQL_EOF >> "$ENV_SQL" 2>/dev/null
+            # [FIX v09.03.02] (B9) 조회 결과를 바로 붙이지 않고 오류부터 본다. 예전에는
+            #   2>/dev/null 로 붙여서 "ORA-00942 ..." 같은 오류 문구가 생성 SQL 에 섞여 들어갔다.
+            _gen_out="$(tmpf env_gen.out)"
+            sqlplus -S /nolog <<SQL_EOF > "$_gen_out" 2>&1
 connect $DB_CONN
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 500 TRIMSPOOL ON
 $PDB_SWITCH_SQL
@@ -2369,7 +2512,10 @@ SELECT 'CREATE ' || CASE WHEN NVL(t.bigfile, 'NO') = 'YES' OR NVL(s.total_mb, 0)
 FROM dba_tablespaces${DBLINK_SUFFIX} t
 LEFT JOIN (SELECT tablespace_name, SUM(bytes)/1024/1024 as total_mb FROM dba_data_files${DBLINK_SUFFIX} GROUP BY tablespace_name) s
   ON t.tablespace_name = s.tablespace_name
-$_tbs_where_clause;
+$_tbs_where_clause
+-- [v09.03.02] (E13) TEMP / UNDO 를 이름(TEMP, UNDOTBS1/2)으로만 빼서 TEMP2, UNDOTBS3 같은
+--   것이 CREATE TABLESPACE ... DATAFILE 로 만들어졌다. 영구 테이블스페이스만 대상으로 한다.
+  AND t.contents = 'PERMANENT';
 
 PROMPT
 PROMPT PROMPT ========================================================================
@@ -2420,6 +2566,11 @@ END;
 /
 EXIT;
 SQL_EOF
+            gen_sql_append_checked "$_gen_out" "$ENV_SQL" "Target 사전 계정/테이블스페이스 DDL" || _gen_ok="false"
+        fi
+        if [ "$_gen_ok" = "false" ]; then
+            rm -f "$ENV_SQL"
+            return 1
         fi
 
         cat <<EOF >> "$ENV_SQL"
@@ -2455,7 +2606,7 @@ EOF
         if [ "$GEN_ROLE" = "SOURCE" ]; then
             GENERATED_FOR_TARGET_SCRIPTS="$GENERATED_FOR_TARGET_SCRIPTS $ENV_SH"
         else
-            # (알려진 문제 E3 — PDB 생성 스텝보다 앞에 놓인다. 2차 수정 대상)
+            # 실행 순서는 run_target_mode 끝의 order_target_steps 가 정한다 (v09.03.02 E3)
             GENERATED_TARGET_SCRIPTS="$ENV_SH $GENERATED_TARGET_SCRIPTS"
         fi
     fi
@@ -2492,6 +2643,7 @@ PROMPT 1. Creating/Recreating Public Synonyms
 PROMPT ========================================================================
 EOF
 
+        _gen_ok="true"
         if [ "$MOCK_MODE" = "true" ]; then
             cat <<EOF >> "$DEP_SQL"
 CREATE OR REPLACE PUBLIC SYNONYM EMP FOR SCOTT.EMP;
@@ -2544,12 +2696,17 @@ EOF
                 fi
             fi
 
-            sqlplus -S /nolog <<SQL_EOF >> "$DEP_SQL" 2>/dev/null
+            # [FIX v09.03.02] (B9) 조회 결과를 바로 붙이지 않고 오류부터 본다. 예전에는
+            #   2>/dev/null 로 붙여서 "ORA-00942 ..." 같은 오류 문구가 생성 SQL 에 섞여 들어갔다.
+            _gen_out="$(tmpf dep_gen.out)"
+            sqlplus -S /nolog <<SQL_EOF > "$_gen_out" 2>&1
 connect $DB_CONN
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 500 TRIMSPOOL ON
 $PDB_SWITCH_SQL
 
-SELECT 'CREATE OR REPLACE PUBLIC SYNONYM "' || synonym_name || '" FOR "' || table_owner || '"."' || table_name || '";'
+-- [v09.03.02] (E12) 원격 객체를 가리키는 시노님은 @db_link 를 붙여야 같은 대상을 가리킨다.
+SELECT 'CREATE OR REPLACE PUBLIC SYNONYM "' || synonym_name || '" FOR "' || table_owner || '"."' || table_name || '"' ||
+       CASE WHEN db_link IS NOT NULL THEN '@' || db_link END || ';'
 FROM dba_synonyms${DBLINK_SUFFIX}
 $_syn_where
 ORDER BY table_owner, synonym_name;
@@ -2557,11 +2714,19 @@ ORDER BY table_owner, synonym_name;
 PROMPT ========================================================================
 PROMPT 2. Granting Object Privileges to Other Users / Roles
 PROMPT ========================================================================
-SELECT 'GRANT ' || privilege || ' ON "' || owner || '"."' || table_name || '" TO "' || grantee || '"' ||
-       CASE WHEN grantable = 'YES' THEN ' WITH GRANT OPTION;' ELSE ';' END
-FROM dba_tab_privs${DBLINK_SUFFIX}
-$_tab_priv_where
-ORDER BY owner, table_name, grantee;
+-- [v09.03.02] (E12) DIRECTORY 권한은 GRANT ... ON DIRECTORY "이름" 으로 줘야 한다.
+--   예전에는 ON "SYS"."이름" 으로 만들어 실행 시 실패했다. 11g 에는 dba_tab_privs.type
+--   컬럼이 없으므로 dba_directories 와 대조해서 판별한다.
+SELECT 'GRANT ' || p.privilege ||
+       CASE WHEN d.directory_name IS NOT NULL
+            THEN ' ON DIRECTORY "' || p.table_name || '"'
+            ELSE ' ON "' || p.owner || '"."' || p.table_name || '"' END ||
+       ' TO "' || p.grantee || '"' ||
+       CASE WHEN p.grantable = 'YES' THEN ' WITH GRANT OPTION;' ELSE ';' END
+FROM (SELECT * FROM dba_tab_privs${DBLINK_SUFFIX} $_tab_priv_where) p
+LEFT JOIN dba_directories${DBLINK_SUFFIX} d
+  ON d.owner = p.owner AND d.directory_name = p.table_name
+ORDER BY p.owner, p.table_name, p.grantee;
 
 PROMPT ========================================================================
 PROMPT 3. Granting Role Privileges to Target Users
@@ -2573,6 +2738,11 @@ $_role_priv_where
 ORDER BY grantee, granted_role;
 EXIT;
 SQL_EOF
+            gen_sql_append_checked "$_gen_out" "$DEP_SQL" "후행 권한/시노님 DDL" || _gen_ok="false"
+        fi
+        if [ "$_gen_ok" = "false" ]; then
+            rm -f "$DEP_SQL"
+            return 1
         fi
 
         cat <<EOF >> "$DEP_SQL"
@@ -2778,7 +2948,7 @@ echo "======================================================================"
 echo "  [Data Pump Job Monitor] 실시간 진행 상태 조회 (UNIQUE_ID: ${UNIQUE_ID})"
 echo "======================================================================"
 sqlplus -S /nolog <<SQL_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 SET LINES 250 PAGES 100 TRIMSPOOL ON
 $PDB_SWITCH_SQL
 COL OWNER_NAME FORMAT A15
@@ -2818,12 +2988,12 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 echo "======================================================================"
 echo "  [Data Pump Job Safe Stop] 진행 중인 Data Pump 작업 안전 중지"
 echo "======================================================================"
-printf "중지할 Data Pump JOB_NAME을 입력하세요 (예: ${UNIQUE_ID}_EXP_GROUP): "
+printf "중지할 Data Pump JOB_NAME을 입력하세요 (예: ${UNIQUE_ID}_EXP_G): "
 read job_name_input
-[ -z "\$job_name_input" ] && job_name_input="${UNIQUE_ID}_EXP_GROUP"
+[ -z "\$job_name_input" ] && job_name_input="${UNIQUE_ID}_EXP_G"
 
-_dp_conn_target="$DB_CONN"
-[ -n "$PDB_CONNECT_STR" ] && _dp_conn_target="$PDB_CONNECT_STR"
+_dp_conn_target="$(hd_esc "$DB_CONN")"
+[ -n "$(hd_esc "$PDB_CONNECT_STR")" ] && _dp_conn_target="$(hd_esc "$PDB_CONNECT_STR")"
 
 echo ">> Data Pump Job '\$job_name_input' 에 접속합니다..."
 echo ">> 프롬프트(Export> 또는 Import>)가 나오면 아래 순서대로 입력하세요:"
@@ -2840,7 +3010,8 @@ rm -f "\$_dp_par"
 EOF
     chmod 700 "$STOP_SH"
 
-    GENERATED_UTIL_SCRIPTS="$MON_SH $STOP_SH"
+    # [FIX v09.03.02] 덮어쓰지 않고 추가한다 (통계 Unlock 등 다른 유틸이 먼저 들어올 수 있다)
+    GENERATED_UTIL_SCRIPTS="$GENERATED_UTIL_SCRIPTS $MON_SH $STOP_SH"
 }
 
 # 마스터 실행 파이프라인 러너 (00_RUN_ALL_MASTER.sh) 생성 함수
@@ -3129,11 +3300,13 @@ estimate_target_size_bytes() {
 connect $DB_CONN
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 100 TRIMSPOOL ON
 $PDB_SWITCH_SQL
-SELECT NVL(SUM(bytes),0) FROM dba_segments${DBLINK_SUFFIX} $_es_where;
+SELECT 'VAL:' || NVL(SUM(bytes),0) FROM dba_segments${DBLINK_SUFFIX} $_es_where;
 EXIT;
 SQL_EOF
 )
-    to_num "$_es_out"
+    # [FIX v09.03.02] (B11) 조회 실패면 0 -> 사전점검이 "산출 실패(WARN)" 로 표시한다.
+    _es_val=$(sql_val "$_es_out")
+    echo "${_es_val:-0}"
     return 0
 }
 
@@ -3163,12 +3336,17 @@ check_version_compatibility() {
     _tgt_major=$(echo "$TARGET_DB_VERSION" | cut -d'.' -f1 | tr -dc '0-9')
     [ -z "$_src_major" ] && return 0
     [ -z "$_tgt_major" ] && return 0
-    if [ "$_src_major" -gt "$_tgt_major" ]; then
+    # [FIX v09.03.02] (B12) major 만 비교하면 12.2 -> 12.1, 11.2 -> 11.1 처럼 major 가 같은
+    #   하향 이관에서 VERSION= 이 빠져 impdp 가 덤프를 읽지 못했다. minor 까지 본다.
+    _src_minor=$(echo "$DB_VERSION" | cut -d'.' -f2 | tr -dc '0-9'); _src_minor=${_src_minor:-0}
+    _tgt_minor=$(echo "$TARGET_DB_VERSION" | cut -d'.' -f2 | tr -dc '0-9'); _tgt_minor=${_tgt_minor:-0}
+    if [ "$_src_major" -gt "$_tgt_major" ] || \
+       { [ "$_src_major" -eq "$_tgt_major" ] && [ "$_src_minor" -gt "$_tgt_minor" ]; }; then
         VERSION_PARAM="VERSION=$TARGET_DB_VERSION"
         if [ "$LANG_PREF" = "EN" ]; then
-            echo "  [ACTION] Source(${_src_major}) is newer than Target(${_tgt_major}) -> adding ${VERSION_PARAM}"
+            echo "  [ACTION] Source(${_src_major}.${_src_minor}) is newer than Target(${_tgt_major}.${_tgt_minor}) -> adding ${VERSION_PARAM}"
         else
-            echo "  [자동조치] Source(${_src_major}c) 가 Target(${_tgt_major}c) 보다 상위 버전 -> ${VERSION_PARAM} 자동 추가"
+            echo "  [자동조치] Source(${_src_major}.${_src_minor}) 가 Target(${_tgt_major}.${_tgt_minor}) 보다 상위 버전 -> ${VERSION_PARAM} 자동 추가"
         fi
         return 1
     fi
@@ -3288,31 +3466,36 @@ EOF
     fi
 
     # 3) LONG / LONG RAW — 네트워크 모드로 이동 불가
-    if [ -n "$_nl_list" ] && [ "$MIG_TYPE" != "FULL" ]; then
-        _nl_owners=$(echo "$_nl_list" | sed "s/[^,]*/'&'/g" | tr 'a-z' 'A-Z')
-        _nl_out=$(sqlplus -S /nolog <<EOF | tr -d ' ' | sed '/^$/d' | head -n 1
-connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0
-$PDB_SWITCH_SQL
-SELECT COUNT(*) FROM dba_tab_columns@${DBLINK_NAME}
- WHERE data_type IN ('LONG','LONG RAW') AND owner IN (${_nl_owners});
-EXIT;
-EOF
-)
+    # [FIX v09.03.02] (B14) TABLESPACE 모드에서는 목록이 테이블스페이스 이름인데 이를
+    #   owner IN (...) 에 넣어, 아무것도 검출되지 않는 거짓 OK 가 나왔다. 해당
+    #   테이블스페이스에 세그먼트를 가진 소유자로 바꿔 검사한다.
+    # [FIX v09.03.02] 제외 목록을 먼저 만든다 (비어 있으면 NOT IN () 문법 오류).
+    build_exclude_owner_list
+    _nl_in=$(sql_in_list "$_nl_list")
+    if [ -n "$_nl_in" ] && [ "$MIG_TYPE" = "TABLESPACE" ]; then
+        _nl_owner_pred="owner IN (SELECT owner FROM dba_segments@${DBLINK_NAME} WHERE tablespace_name IN (${_nl_in}))"
+    elif [ -n "$_nl_in" ] && [ "$MIG_TYPE" != "FULL" ]; then
+        _nl_owner_pred="owner IN (${_nl_in})"
     else
-        _nl_out=$(sqlplus -S /nolog <<EOF | tr -d ' ' | sed '/^$/d' | head -n 1
+        _nl_owner_pred="owner NOT IN (${DEEP_EXCL_OWNERS})"
+    fi
+    # [FIX v09.03.02] (B11) VAL: 마커로 읽고, 못 읽으면 "확인 실패" 로 FAIL 처리한다.
+    _nl_out=$(sqlplus -S /nolog <<EOF
 connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0
+SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 200
 $PDB_SWITCH_SQL
-SELECT COUNT(*) FROM dba_tab_columns@${DBLINK_NAME}
- WHERE data_type IN ('LONG','LONG RAW') AND owner NOT IN (${DEEP_EXCL_OWNERS});
+SELECT 'VAL:' || COUNT(*) FROM dba_tab_columns@${DBLINK_NAME}
+ WHERE data_type IN ('LONG','LONG RAW') AND ${_nl_owner_pred};
 EXIT;
 EOF
 )
-    fi
-    _nl_out=$(to_num "$_nl_out")
+    _nl_out=$(sql_val "$_nl_out")
 
-    if [ "$_nl_out" -gt 0 ]; then
+    if [ -z "$_nl_out" ]; then
+        echo "   [FAIL] LONG/LONG RAW  : 원격 딕셔너리를 조회하지 못했습니다 (권한/DB Link 확인)"
+        pf_record "NETWORK" "LONG/LONG RAW 컬럼" "FAIL" "조회 실패 - 확인되지 않음"
+        NETWORK_PRECHECK_RESULT="FAIL"
+    elif [ "$_nl_out" -gt 0 ]; then
         printf "   [FAIL] LONG/LONG RAW  : %s 개 컬럼 검출 - 네트워크 모드로 이동할 수 없습니다\n" "$_nl_out"
         echo "          해당 테이블은 Dump File 방식(메뉴 1 -> 2)으로 따로 옮기십시오."
         pf_record "NETWORK" "LONG/LONG RAW 컬럼" "FAIL" "${_nl_out} 개 검출 - 네트워크 모드 이동 불가"
@@ -3583,15 +3766,13 @@ run_source_mode() {
         DBLINK_NAME=$(echo "$DBLINK_NAME" | tr 'a-z' 'A-Z')
 
         if [ "$MOCK_MODE" != "true" ]; then
-            link_cnt=$(sqlplus -S /nolog <<EOF
-connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0
-$PDB_SWITCH_SQL
-SELECT COUNT(*) FROM dba_db_links WHERE db_link = '$DBLINK_NAME';
-EXIT;
-EOF
-)
-            link_cnt=$(to_num "$link_cnt")
+            # [FIX v09.03.02] (B11/B15) 공통 함수로 확인. 조회 실패면 추측하지 않고 멈춘다.
+            link_cnt=$(dblink_count "$DBLINK_NAME")
+            if [ -z "$link_cnt" ]; then
+                if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] Could not check whether DB Link '$DBLINK_NAME' exists (connection / privilege)."
+                else echo "  [오류] DB Link '$DBLINK_NAME' 존재 여부를 확인하지 못했습니다 (접속/권한 확인)."; fi
+                return 1
+            fi
             if [ "$link_cnt" -eq 0 ]; then
                 if [ "$LANG_PREF" = "EN" ]; then echo "  >> DB Link '$DBLINK_NAME' not found. Let's create it."
                 else echo "  >> DB Link '$DBLINK_NAME'가 존재하지 않습니다. 생성을 진행합니다."; fi
@@ -3604,9 +3785,9 @@ EOF
                 #   패스워드 특수문자 검사 + SET DEFINE OFF + 종료코드 판정이 들어간다.
                 if ! create_dblink_live "$DBLINK_NAME" "$src_user" "$src_pwd" "$src_tns"; then
                     if [ "$LANG_PREF" = "EN" ]; then
-                        echo "  >> NETWORK_LINK import cannot proceed without the DB Link."
+                        echo "  >> NETWORK_LINK export cannot proceed without the DB Link."
                     else
-                        echo "  >> DB Link 없이는 NETWORK_LINK 임포트를 진행할 수 없습니다."
+                        echo "  >> DB Link 없이는 NETWORK_LINK 익스포트를 진행할 수 없습니다."
                     fi
                     return 1
                 fi
@@ -3747,15 +3928,22 @@ EOF
     # ------------------------------------------------------------------
     run_preflight_checks "SOURCE" || return 1
 
-    DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Unique Migration ID [Default: MIG_${MIG_TYPE}_${DATE_STR}]: "
-    else printf "  이관 작업의 고유 ID를 입력하세요 [기본값: MIG_${MIG_TYPE}_${DATE_STR}]: "; fi
-    _read user_id
-    if [ -z "$user_id" ]; then
-        UNIQUE_ID="MIG_${MIG_TYPE}_${DATE_STR}"
-    else
-        UNIQUE_ID=$(echo "$user_id" | tr ' ' '_')
-    fi
+    # [FIX v09.03.02] (E2) 기본 ID 를 짧게 바꾸고 검증한다.
+    #   예전 기본값 MIG_SCHEMA_20261002_080334 (26자) 에 _META_CUS 등이 붙으면 30자를
+    #   넘어, 11g/12.1 Source 에서 JOB_NAME / 통계 테이블명이 실패했다.
+    case "$MIG_TYPE" in
+        SCHEMA) _uid_pfx="MS" ;; TABLE) _uid_pfx="MT" ;;
+        TABLESPACE) _uid_pfx="MTS" ;; *) _uid_pfx="MF" ;;
+    esac
+    _uid_default="${_uid_pfx}_$(date +%y%m%d%H%M 2>/dev/null || echo "$$")"
+    while true; do
+        if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Unique Migration ID [Default: %s]: " "$_uid_default"
+        else printf "  이관 작업의 고유 ID를 입력하세요 [기본값: %s]: " "$_uid_default"; fi
+        _read user_id
+        [ -z "$user_id" ] && user_id="$_uid_default"
+        if UNIQUE_ID=$(normalize_unique_id "$user_id"); then break; fi
+        [ "$UNATTENDED" = "true" ] && return 1
+    done
     # [NEW v08.03] 사전 검증 결과를 HTML 리포트가 읽을 수 있도록 확정 기록
     flush_preflight_csv
 
@@ -3769,7 +3957,16 @@ EOF
         else
             scn_sql="$(tmpf get_scn.sql)"
             echo "SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 100 TRIMSPOOL ON;" > "$scn_sql"
-            echo "SELECT current_scn FROM v\$database;" >> "$scn_sql"
+            # [FIX v09.03.02] (B13) NETWORK_LINK Export 의 FLASHBACK_SCN 은 원격(Source) DB 의
+            #   SCN 이어야 한다. 예전에는 로컬 DB 의 SCN 을 넣어, 원격 기준으로 존재하지 않는
+            #   SCN 이 되거나(실패) 엉뚱한 시점이 되었다.
+            if [ "$EXPORT_METHOD" = "NETWORK_LINK" ] && [ -n "$DBLINK_NAME" ]; then
+                [ -n "$PDB_SWITCH_SQL" ] && echo "$PDB_SWITCH_SQL" >> "$scn_sql"
+                echo "SELECT current_scn FROM v\$database@${DBLINK_NAME};" >> "$scn_sql"
+                echo "  >> 원격(Source) DB 의 SCN 을 DB Link(${DBLINK_NAME}) 로 조회합니다."
+            else
+                echo "SELECT current_scn FROM v\$database;" >> "$scn_sql"
+            fi
             echo "EXIT;" >> "$scn_sql"
             CURRENT_SCN=$(sqlplus -S /nolog <<CONNECT_EOF | grep -v '^$' | tr -d ' ' | head -n 1
 connect $DB_CONN
@@ -3885,7 +4082,7 @@ EOF
     if [ -n "$CREATE_DIR_SQL" ]; then
         cat <<EOF >> "$META_SH"
 sqlplus -S /nolog <<SQL_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 $CREATE_DIR_SQL
 $GRANT_DIR_SQL
 EXIT;
@@ -3985,6 +4182,10 @@ CONNECT_EOF
         _exp_suffix="$2"
         _exp_p_type="$3"
         _exp_use_parallel="$4"
+        # [FIX v09.03.02] (E2) JOB_NAME 은 짧은 태그(B1, B2 ... / G)로 만든다. 예전에는 개별
+        #   대상 이름(예: KMSUNG_TB_PAYMENT_LOG)을 그대로 붙여 30자를 쉽게 넘었다.
+        #   파일명은 알아보기 쉽게 대상 이름을 그대로 쓴다.
+        _exp_jobtag="${5:-$2}"
         
         _exp_m_params=""
         if [ "$_exp_p_type" = "FULL" ]; then _exp_m_params="FULL=Y"; else _exp_m_params="${_exp_p_type}=${_exp_target_items}"; fi
@@ -4038,7 +4239,7 @@ $_exp_m_params
 STATUS=30
 LOGTIME=ALL
 METRICS=YES
-JOB_NAME=${UNIQUE_ID}_EXP_${_exp_suffix}
+JOB_NAME=${UNIQUE_ID}_EXP_${_exp_jobtag}
 EOF
         if [ "$DB_CLUSTER" = "TRUE" ]; then echo "CLUSTER=N" >> "$_exp_exec_par"; fi
         if [ -n "$EXP_SOURCE_PARAM" ]; then echo "$EXP_SOURCE_PARAM" >> "$_exp_exec_par"; fi
@@ -4077,17 +4278,19 @@ EOF
 
     if [ -n "$BIG_ITEMS" ]; then
         IFS_BACKUP=$IFS; IFS=","
+        _b_idx=0
         for b_item in $BIG_ITEMS; do
+            _b_idx=$((_b_idx + 1))
             b_suffix=$(echo "$b_item" | tr '.:' '__')
             echo "  [개별(기준 이상) 대상 스크립트 생성] $b_item"
-            generate_expdp_scripts "$b_item" "$b_suffix" "$PARAM_TYPE" "YES"
+            generate_expdp_scripts "$b_item" "$b_suffix" "$PARAM_TYPE" "YES" "B${_b_idx}"
         done
         IFS=$IFS_BACKUP
     fi
 
     if [ -n "$SMALL_ITEMS" ]; then
         echo "  [그룹화(기준 미만) 대상 스크립트 생성]"
-        generate_expdp_scripts "$SMALL_ITEMS" "GROUP" "$PARAM_TYPE" "NO"
+        generate_expdp_scripts "$SMALL_ITEMS" "GROUP" "$PARAM_TYPE" "NO" "G"
     fi
 
     if [ "$EXPORT_METHOD" = "LOCAL" ]; then
@@ -4175,7 +4378,7 @@ EOF
 echo ">> DBMS_STATS 통계정보를 Stat Table에 담는 중입니다..."
 sqlplus -S /nolog <<CONNECT_EOF
 WHENEVER SQLERROR EXIT FAILURE
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$STATS_SQL
 CONNECT_EOF
 _rc_sql=\$?
@@ -4190,7 +4393,7 @@ fi
 
 echo ">> 임시 통계 테이블(${STAT_OWN}.${STAT_TAB})을 삭제합니다..."
 sqlplus -S /nolog <<SQL_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 $PDB_SWITCH_SQL
 BEGIN
   DBMS_STATS.DROP_STAT_TABLE('${STAT_OWN}', '${STAT_TAB}');
@@ -4534,38 +4737,68 @@ SPOOL dblink_1_copy_${UNIQUE_ID}.log
 
 ${PDB_SWITCH_SQL}
 
+-- [v09.03.02] (B18) 청크 경계 / NULL / 컬럼 순서
+--   - 예전에는 NTILE 을 원본 행 위에 바로 걸어, 같은 값이 두 그룹에 걸치면 구간이 겹쳐
+--     (BETWEEN) 그 값의 행이 두 번 복사되었다. 고유값(DISTINCT) 위에서 나눠 구간이
+--     겹치지 않게 한다.
+--   - 분할 컬럼이 NULL 인 행은 어느 구간에도 들지 않아 조용히 빠졌다. 따로 복사한다.
+--   - SELECT * 위치 기반 INSERT 는 가상 컬럼이 있으면 실패했다. 로컬 테이블의 실제
+--     컬럼 목록(가상/숨김 제외)을 이름으로 지정한다.
 DECLARE
   v_task  VARCHAR2(128);
-  v_sql   VARCHAR2(4000);
+  v_sql   VARCHAR2(32767);
   v_chunk VARCHAR2(4000);
+  v_cols  VARCHAR2(32767);
   v_st    NUMBER;
+  v_null  NUMBER;
 BEGIN
   FOR t IN (SELECT owner, table_name FROM dba_tables
              WHERE owner IN (${DL_OWNER_IN})
                AND table_name IN (${DL_TABLE_IN})
              ORDER BY owner, table_name) LOOP
 
+    v_cols := NULL;
+    FOR c IN (SELECT column_name FROM dba_tab_cols
+               WHERE owner = t.owner AND table_name = t.table_name
+                 AND virtual_column = 'NO' AND hidden_column = 'NO'
+               ORDER BY column_id) LOOP
+      v_cols := v_cols || CASE WHEN v_cols IS NOT NULL THEN ',' END || '"' || c.column_name || '"';
+    END LOOP;
+
     v_task := 'DLCOPY_${UNIQUE_ID}_' || t.table_name;
     BEGIN DBMS_PARALLEL_EXECUTE.DROP_TASK(v_task); EXCEPTION WHEN OTHERS THEN NULL; END;
     DBMS_PARALLEL_EXECUTE.CREATE_TASK(v_task);
 
-    -- 원격 테이블의 ${DL_CHUNK_COL} 값을 ${DL_CHUNKS} 구간으로 나눈다.
+    -- 원격 테이블의 ${DL_CHUNK_COL} 고유값을 ${DL_CHUNKS} 구간으로 나눈다 (구간끼리 겹치지 않음).
     v_chunk := 'SELECT MIN(c) AS start_id, MAX(c) AS end_id FROM ('
-            || '  SELECT ${DL_CHUNK_COL} c, NTILE(${DL_CHUNKS}) OVER (ORDER BY ${DL_CHUNK_COL}) g'
-            || '    FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
-            || ') GROUP BY g';
+            || '  SELECT c, NTILE(${DL_CHUNKS}) OVER (ORDER BY c) g FROM ('
+            || '    SELECT DISTINCT ${DL_CHUNK_COL} c'
+            || '      FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
+            || '     WHERE ${DL_CHUNK_COL} IS NOT NULL'
+            || '  )) GROUP BY g';
     DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_SQL(v_task, v_chunk, false);
 
-    v_sql := 'INSERT INTO "' || t.owner || '"."' || t.table_name || '" '
-          || 'SELECT * FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
+    v_sql := 'INSERT INTO "' || t.owner || '"."' || t.table_name || '" (' || v_cols || ') '
+          || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
           || ' WHERE ${DL_CHUNK_COL} BETWEEN :start_id AND :end_id${DL_WHERE_EXTRA}';
 
     DBMS_PARALLEL_EXECUTE.RUN_TASK(v_task, v_sql, DBMS_SQL.NATIVE,
                                    parallel_level => ${DL_PDEG});
 
     v_st := DBMS_PARALLEL_EXECUTE.TASK_STATUS(v_task);
+
+    -- 분할 컬럼이 NULL 인 행
+    v_null := 0;
+    IF v_st = DBMS_PARALLEL_EXECUTE.FINISHED THEN
+      EXECUTE IMMEDIATE 'INSERT INTO "' || t.owner || '"."' || t.table_name || '" (' || v_cols || ') '
+                     || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
+                     || ' WHERE ${DL_CHUNK_COL} IS NULL${DL_WHERE_EXTRA}';
+      v_null := SQL%ROWCOUNT;
+      COMMIT;
+    END IF;
+
     DBMS_OUTPUT.PUT_LINE(RPAD(t.owner || '.' || t.table_name, 50) ||
-      CASE v_st WHEN DBMS_PARALLEL_EXECUTE.FINISHED THEN ' : OK'
+      CASE v_st WHEN DBMS_PARALLEL_EXECUTE.FINISHED THEN ' : OK (+' || v_null || ' rows with NULL ${DL_CHUNK_COL})'
                 ELSE ' : *** status=' || v_st || ' (user_parallel_execute_chunks 확인)' END);
     COMMIT;
   END LOOP;
@@ -4593,8 +4826,9 @@ ${PDB_SWITCH_SQL}
 ALTER SESSION ENABLE PARALLEL DML;
 
 DECLARE
-  v_sql VARCHAR2(4000);
-  v_n   NUMBER;
+  v_sql  VARCHAR2(32767);
+  v_cols VARCHAR2(32767);
+  v_n    NUMBER;
   v_ok  NUMBER := 0;
   v_ng  NUMBER := 0;
 BEGIN
@@ -4603,8 +4837,16 @@ BEGIN
                AND table_name IN (${DL_TABLE_IN})
              ORDER BY owner, table_name) LOOP
     BEGIN
-      v_sql := 'INSERT ${_dl_hint}INTO "' || t.owner || '"."' || t.table_name || '" '
-            || 'SELECT * FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
+      -- [v09.03.02] (B18) SELECT * 위치 기반 INSERT 대신 실제 컬럼 이름 목록(가상/숨김 제외)
+      v_cols := NULL;
+      FOR c IN (SELECT column_name FROM dba_tab_cols
+                 WHERE owner = t.owner AND table_name = t.table_name
+                   AND virtual_column = 'NO' AND hidden_column = 'NO'
+                 ORDER BY column_id) LOOP
+        v_cols := v_cols || CASE WHEN v_cols IS NOT NULL THEN ',' END || '"' || c.column_name || '"';
+      END LOOP;
+      v_sql := 'INSERT ${_dl_hint}INTO "' || t.owner || '"."' || t.table_name || '" (' || v_cols || ') '
+            || 'SELECT ' || v_cols || ' FROM "' || t.owner || '"."' || t.table_name || '"@${DL_LINK_NAME}'
             || '${DL_WHERE_CLAUSE}';
       EXECUTE IMMEDIATE v_sql;
       v_n := SQL%ROWCOUNT;
@@ -4696,7 +4938,7 @@ export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 echo ">> ${_ti} 를 실행합니다..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @${_sq}
 CONNECT_EOF
 echo ">> 완료."
@@ -4843,6 +5085,35 @@ run_dblink_copy_mode() {
     return 0
 }
 
+# ------------------------------------------------------------------------------
+# [FIX v09.03.02] (E3) Target 파이프라인 스텝 순서
+#   덤프 검증 -> PDB 생성 -> 계정/TBS -> DDL 추출 -> 구조 -> FK/트리거 끄기 -> 데이터
+#   -> FK/트리거 켜기 -> 나머지 객체 -> 통계 -> 통계 잠금 -> 권한/시노님 -> 사후 검증
+#   권한(GRANT)을 사후 검증(utlrp 재컴파일) 앞에 둔다. 다른 스키마 객체를 참조하는
+#   뷰/패키지는 권한이 들어온 뒤에야 VALID 가 된다.
+# ------------------------------------------------------------------------------
+order_target_steps() {
+    for _ots in $1; do
+        case "$_ots" in
+            checksum_verify_*)              _otr=10 ;;
+            00_create_target_pdb_*)         _otr=20 ;;
+            00_create_target_env_*)         _otr=30 ;;
+            impdp_0_extract_ddl_*)          _otr=40 ;;
+            impdp_1_table_meta_*)           _otr=50 ;;
+            impdp_1_1_disable_constraints_*) _otr=60 ;;
+            impdp_2_data_*|impdp_1_execute_all_*) _otr=70 ;;
+            impdp_2_1_enable_constraints_*) _otr=80 ;;
+            impdp_3_rest_*)                 _otr=90 ;;
+            import_dbms_stats_*)            _otr=100 ;;
+            lock_stats_*)                   _otr=110 ;;
+            99_post_grants_synonyms_*)      _otr=120 ;;
+            impdp_4_post_validate_*)        _otr=130 ;;
+            *)                              _otr=125 ;;
+        esac
+        printf '%03d %s\n' "$_otr" "$_ots"
+    done | sort -n -k1,1 | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//'
+}
+
 run_target_mode() {
     # [NEW v08.03] 함수 스크래치 변수 지역화 — 메뉴 재진입/함수 간 값 누수 차단
     # [v09.02] local 제거 (ksh 비호환): _fi _lf _src_ts_list _sts
@@ -4850,6 +5121,8 @@ run_target_mode() {
     reset_generation_state
     # [FIX v09.03.01] (B1) 공용 생성 함수가 Target 쪽 생성임을 알게 한다.
     GEN_ROLE="TARGET"
+    # [FIX v09.03.02] (B9) Source 모드에서 설정한 @링크 가 같은 세션에 남아 새지 않게 비운다.
+    DBLINK_SUFFIX=""
     clear_screen
     echo "======================================================================"
     if [ "$LANG_PREF" = "EN" ]; then echo " [2] TARGET SERVER: Check Resources & Generate impdp Scripts"
@@ -4879,7 +5152,8 @@ run_target_mode() {
         echo "  [오류/ERROR] UNIQUE_ID is required."
         return 1
     fi
-    UNIQUE_ID=$(echo "$user_id" | tr ' ' '_')
+    # [FIX v09.03.02] (E2) Source 와 같은 규칙으로 검증 (Target 버전 기준 길이 제한)
+    UNIQUE_ID=$(normalize_unique_id "$user_id" keepcase) || return 1
 
     # Target PDB 신규 생성 모듈 (23c / 19c CDB 환경 지원)
     generate_target_pdb_ddl
@@ -4928,15 +5202,13 @@ run_target_mode() {
         DBLINK_NAME=$(echo "$DBLINK_NAME" | tr 'a-z' 'A-Z')
 
         if [ "$MOCK_MODE" != "true" ]; then
-            link_cnt=$(sqlplus -S /nolog <<EOF
-connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0
-$PDB_SWITCH_SQL
-SELECT COUNT(*) FROM dba_db_links WHERE db_link = '$DBLINK_NAME';
-EXIT;
-EOF
-)
-            link_cnt=$(to_num "$link_cnt")
+            # [FIX v09.03.02] (B11/B15) 공통 함수로 확인. 조회 실패면 추측하지 않고 멈춘다.
+            link_cnt=$(dblink_count "$DBLINK_NAME")
+            if [ -z "$link_cnt" ]; then
+                if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] Could not check whether DB Link '$DBLINK_NAME' exists (connection / privilege)."
+                else echo "  [오류] DB Link '$DBLINK_NAME' 존재 여부를 확인하지 못했습니다 (접속/권한 확인)."; fi
+                return 1
+            fi
             if [ "$link_cnt" -eq 0 ]; then
                 if [ "$LANG_PREF" = "EN" ]; then echo "  >> DB Link '$DBLINK_NAME' not found. Let's create it."
                 else echo "  >> Target DB에 DB Link '$DBLINK_NAME'가 존재하지 않습니다. 생성을 진행합니다."; fi
@@ -5093,18 +5365,27 @@ EOF
             OBJ_LIST=$(while IFS= read -r _lf; do
                            [ -n "$_lf" ] || continue
                            awk '/\.\ \.\ exported/ { line=$0; gsub(/"/, "", line); split(line, parts); for(i=1;i<=NF;i++) { if(parts[i]=="exported") { print parts[i+1]; break; } } }' "$_lf"
-                       done < "$LOG_LIST_FILE" 2>/dev/null | sort | uniq | awk -F'.' '{printf "(\047%s\047,\047%s\047)\n", $1, $2}' | paste -sd,)
+                       done < "$LOG_LIST_FILE" 2>/dev/null | sed 's/:.*$//' | sort | uniq \
+                       | awk -F'.' '{printf "(\047%s\047,\047%s\047)\n", $1, $2}' | sed '$!s/$/,/')
+            # [FIX v09.03.02] (E11) 예전에는 목록을 한 줄로 이어 붙여(paste -sd,) 테이블이 많으면
+            #   SQL*Plus 한 줄 제한(2499자)에 걸렸고, 오류 문구가 그대로 GLOBAL_OBJ_COLLISION 에
+            #   들어가 [ -gt ] 비교가 "integer expression expected" 로 깨졌다.
+            #   튜플은 한 줄에 하나씩 넘기고(다중 컬럼 IN 은 1000개 제한이 없다), 결과는 VAL: 로
+            #   읽는다. 파티션 표기(T:P)는 테이블 이름만 남긴다. 조회 실패는 -1 = 확인 실패.
             if [ -n "$OBJ_LIST" ]; then
-                GLOBAL_OBJ_COLLISION=$(sqlplus -S /nolog <<EOF | tr -d ' ' | sed '/^$/d'
+                _goc_out=$(sqlplus -S /nolog <<EOF
 connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 100
+SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 200
 $PDB_SWITCH_SQL
-SELECT COUNT(*) FROM dba_tables WHERE (owner, table_name) IN ($OBJ_LIST);
+SELECT 'VAL:' || COUNT(*) FROM dba_tables WHERE (owner, table_name) IN (
+$OBJ_LIST
+);
 EXIT;
 EOF
 )
+                GLOBAL_OBJ_COLLISION=$(sql_val "$_goc_out")
+                [ -z "$GLOBAL_OBJ_COLLISION" ] && GLOBAL_OBJ_COLLISION=-1
             fi
-            [ -z "$GLOBAL_OBJ_COLLISION" ] && GLOBAL_OBJ_COLLISION=0
         fi
 
         TABLE_FILE="$(tmpf table_data.tmp)"
@@ -5119,12 +5400,16 @@ EOF
 connect $DB_CONN
 SET HEAD OFF FEEDBACK OFF
 $PDB_SWITCH_SQL
-SELECT COUNT(*) FROM dba_users WHERE username='$item';
+SELECT 'VAL:' || COUNT(*) FROM dba_users WHERE username='$item';
 EXIT;
 EOF
 )
-                cnt=$(to_num "$cnt")
-                if [ "$cnt" -gt 0 ]; then
+                # [FIX v09.03.02] (B11) 조회 실패는 "충돌 없음" 이 아니라 "확인 실패" 다.
+                cnt=$(sql_val "$cnt")
+                if [ -z "$cnt" ]; then
+                    conflict="true"
+                    conflict_detail="Check Failed (확인 실패 - 접속/권한)"
+                elif [ "$cnt" -gt 0 ]; then
                     conflict="true"
                     conflict_detail="User/Schema Exists"
                 fi
@@ -5134,12 +5419,15 @@ EOF
 connect $DB_CONN
 SET HEAD OFF FEEDBACK OFF
 $PDB_SWITCH_SQL
-SELECT COUNT(*) FROM dba_tables WHERE owner='$own_p' AND table_name='$tab_p';
+SELECT 'VAL:' || COUNT(*) FROM dba_tables WHERE owner='$own_p' AND table_name='$tab_p';
 EXIT;
 EOF
 )
-                cnt=$(to_num "$cnt")
-                if [ "$cnt" -gt 0 ]; then
+                cnt=$(sql_val "$cnt")
+                if [ -z "$cnt" ]; then
+                    conflict="true"
+                    conflict_detail="Check Failed (확인 실패 - 접속/권한)"
+                elif [ "$cnt" -gt 0 ]; then
                     conflict="true"
                     conflict_detail="Table Exists"
                 fi
@@ -5151,7 +5439,7 @@ EOF
 connect $DB_CONN
 SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 100 TRIMSPOOL ON
 $PDB_SWITCH_SQL
-SELECT 
+SELECT 'VAL:' ||
     (SELECT COUNT(*) FROM dba_tablespaces WHERE tablespace_name = '$item') || '|' ||
     (SELECT COUNT(*) FROM dba_segments WHERE tablespace_name = '$item') || '|' ||
     (SELECT LISTAGG(segment_name, ',') WITHIN GROUP (ORDER BY segment_name) FROM (SELECT segment_name FROM dba_segments WHERE tablespace_name = '$item' AND ROWNUM <= 3))
@@ -5159,29 +5447,37 @@ FROM dual;
 EXIT;
 EOF
 )
-                    ts_cnt=$(echo "$res" | cut -d'|' -f1 | tr -d ' ' | sed '/^$/d')
-                    tbl_cnt=$(echo "$res" | cut -d'|' -f2 | tr -d ' ' | sed '/^$/d')
-                    sample_objs=$(echo "$res" | cut -d'|' -f3 | sed 's/^ *//g' | sed 's/ *$//g' | sed '/^$/d')
-                    
-                    [ -z "$ts_cnt" ] && ts_cnt=0
-                    [ -z "$tbl_cnt" ] && tbl_cnt=0
+                    # [FIX v09.03.02] (B11) VAL: 줄만 읽고, 숫자가 아니면 확인 실패로 둔다.
+                    res=$(echo "$res" | sed -n 's/^[[:space:]]*VAL://p' | head -n 1)
+                    ts_cnt=$(echo "$res" | cut -d'|' -f1 | tr -d ' ')
+                    tbl_cnt=$(echo "$res" | cut -d'|' -f2 | tr -d ' ')
+                    sample_objs=$(echo "$res" | cut -d'|' -f3 | sed 's/^ *//g' | sed 's/ *$//g')
+                    echo "$ts_cnt" | grep -qE '^[0-9]+$' || ts_cnt=-1
+                    echo "$tbl_cnt" | grep -qE '^[0-9]+$' || tbl_cnt=-1
                     [ -z "$sample_objs" ] && sample_objs="None"
                     
                     link_obj_coll=0
                     if [ "$IMPORT_METHOD" = "NETWORK_LINK" ] && [ "$MOCK_MODE" != "true" ]; then
-                        link_obj_coll=$(sqlplus -S /nolog <<EOF | tr -d ' ' | sed '/^$/d'
+                        link_obj_coll=$(sqlplus -S /nolog <<EOF
 connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 100
+SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 200
 $PDB_SWITCH_SQL
-SELECT COUNT(*) FROM dba_tables t JOIN dba_tables@$DBLINK_NAME s ON t.owner=s.owner AND t.table_name=s.table_name WHERE s.tablespace_name='$item';
+SELECT 'VAL:' || COUNT(*) FROM dba_tables t JOIN dba_tables@$DBLINK_NAME s ON t.owner=s.owner AND t.table_name=s.table_name WHERE s.tablespace_name='$item';
 EXIT;
 EOF
 )
+                        link_obj_coll=$(sql_val "$link_obj_coll")
+                        [ -z "$link_obj_coll" ] && link_obj_coll=-1
                     fi
                 fi
                 [ -z "$link_obj_coll" ] && link_obj_coll=0
-                
-                if [ "$ts_cnt" -gt 0 ]; then
+
+                # [FIX v09.03.02] (B11/E11) 어느 하나라도 조회에 실패했으면 "깨끗함" 이 아니다.
+                if [ "$ts_cnt" -lt 0 ] || [ "$tbl_cnt" -lt 0 ] || [ "$link_obj_coll" -lt 0 ] \
+                   || { [ "$IMPORT_METHOD" = "DUMP" ] && [ "$GLOBAL_OBJ_COLLISION" -lt 0 ]; }; then
+                    conflict="true"
+                    conflict_detail="Check Failed (확인 실패 - 접속/권한 또는 대상 목록 과다)"
+                elif [ "$ts_cnt" -gt 0 ]; then
                     if [ "$tbl_cnt" -gt 0 ]; then
                         conflict="true"
                         if [ "$tbl_cnt" -gt 3 ]; then
@@ -5568,7 +5864,7 @@ EOF
     if [ -n "$CREATE_DIR_SQL" ]; then
         cat <<EOF >> "$DDL_EXTRACT_SH"
 sqlplus -S /nolog <<SQL_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 $CREATE_DIR_SQL
 $GRANT_DIR_SQL
 EXIT;
@@ -6199,7 +6495,7 @@ else
     echo ">> DBMS_STATS 복원 스크립트를 실행하여 통계를 딕셔너리에 반영합니다..."
     sqlplus -S /nolog <<CONNECT_EOF
 WHENEVER SQLERROR EXIT FAILURE
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$IMP_STATS_SQL
 CONNECT_EOF
     _rc_sql=\$?
@@ -6208,7 +6504,7 @@ fi
 
 echo ">> 임시 통계 테이블(${STAT_OWN}.${STAT_TAB})을 삭제합니다..."
 sqlplus -S /nolog <<SQL_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 $PDB_SWITCH_SQL
 BEGIN
   DBMS_STATS.DROP_STAT_TABLE('${STAT_OWN}', '${STAT_TAB}');
@@ -6338,7 +6634,7 @@ echo ">> Target DB Optimizer 통계 잠금을 실행합니다 (야간 Auto Task 
 rm -f "lock_stats_${UNIQUE_ID}.log"
 sqlplus -S /nolog <<CONNECT_EOF
 WHENEVER SQLERROR EXIT FAILURE
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$LOCK_SQL
 CONNECT_EOF
 EOF
@@ -6445,13 +6741,15 @@ echo ">> Target DB Optimizer 통계 잠금을 해제합니다..."
 rm -f "unlock_stats_${UNIQUE_ID}.log"
 sqlplus -S /nolog <<CONNECT_EOF
 WHENEVER SQLERROR EXIT FAILURE
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$UNLOCK_SQL
 CONNECT_EOF
 EOF
     emit_sql_result_check "$UNLOCK_SH" "unlock_stats_${UNIQUE_ID}.log" "" "통계 잠금 해제(Unlock)"
     chmod 700 "$UNLOCK_SH"
-    GENERATED_TARGET_SCRIPTS="$GENERATED_TARGET_SCRIPTS $UNLOCK_SH"
+    # [FIX v09.03.02] (B3) Unlock 은 파이프라인에 넣지 않는다. 예전에는 Lock 바로 다음
+    #   스텝이 Unlock 이라 잠금이 즉시 풀렸다. 유지보수 때 수동으로 돌리는 유틸이다.
+    GENERATED_UTIL_SCRIPTS="$GENERATED_UTIL_SCRIPTS $UNLOCK_SH"
 
     echo "----------------------------------------------------------------------"
     if [ "$LANG_PREF" = "EN" ]; then printf "  [Validation] Generate Post-Migration Validation script (UTLRP, Size & Log Check)? (y/N): "
@@ -6538,7 +6836,7 @@ _val_rc=0
 
 echo ">> [1/3] Invalid Object 자동 재컴파일을 수행합니다 (utlrp.sql)..."
 sqlplus -S /nolog <<SQL_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 $PDB_SWITCH_SQL
 @\$ORACLE_HOME/rdbms/admin/utlrp.sql
 EXIT;
@@ -6546,7 +6844,7 @@ SQL_EOF
 
 echo ">> [2/3] 용량 및 객체 상태 검증 리포트를 추출합니다..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$VAL_SQL
 CONNECT_EOF
 
@@ -6664,11 +6962,53 @@ EOF
         fi
     fi
 
-    generate_target_env_ddl
-    generate_grants_and_synonyms_scripts
+    # ------------------------------------------------------------------
+    # [FIX v09.03.02] (B9) 계정/TBS DDL 과 권한/시노님 DDL 은 "Source" 딕셔너리에서 만들어야 한다.
+    #   예전에는 Target 모드에서도 DBLINK_SUFFIX 가 비어 있어 Target 자신의 딕셔너리를 읽었고,
+    #   이미 있는 계정/권한을 다시 만드는 쓸모없는 DDL 이 나왔다 (Source 의 것은 누락).
+    #     NETWORK_LINK : 이관에 쓰는 DB Link 로 Source 딕셔너리를 읽는다.
+    #     DUMP         : Source 딕셔너리를 읽을 DB Link 를 물어본다. 없으면 생성하지 않고
+    #                    Source 모드(메뉴 1)가 만든 Target 서버용 파일을 쓰도록 안내한다.
+    # ------------------------------------------------------------------
+    _tgt_dict_link=""
+    if [ "$IMPORT_METHOD" = "NETWORK_LINK" ]; then
+        _tgt_dict_link="$DBLINK_NAME"
+    else
+        echo "----------------------------------------------------------------------"
+        if [ "$LANG_PREF" = "EN" ]; then
+            echo "  [Target pre-DDL / grants] These must be built from the SOURCE dictionary."
+            printf "  DB Link to the Source DB (Enter = skip; use the files made by menu 1): "
+        else
+            echo "  [Target 사전 DDL / 권한] 계정·테이블스페이스·권한 DDL 은 Source 딕셔너리에서 만들어야 합니다."
+            printf "  Source DB 로 가는 DB Link 이름 (엔터 = 생성 생략, 메뉴 1 이 만든 Target 서버용 파일 사용): "
+        fi
+        _read env_src_link
+        _tgt_dict_link=$(echo "$env_src_link" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
+        if [ -n "$_tgt_dict_link" ] && [ "$MOCK_MODE" != "true" ]; then
+            _tdl_cnt=$(dblink_count "$_tgt_dict_link")
+            if [ -z "$_tdl_cnt" ] || [ "$_tdl_cnt" -eq 0 ]; then
+                if [ "$LANG_PREF" = "EN" ]; then echo "  [WARN] DB Link '$_tgt_dict_link' not found/usable - skipping pre-DDL and grants generation."
+                else echo "  [경고] DB Link '$_tgt_dict_link' 를 찾지 못했거나 쓸 수 없어 사전 DDL / 권한 생성을 건너뜁니다."; fi
+                _tgt_dict_link=""
+            fi
+        fi
+    fi
+    if [ -n "$_tgt_dict_link" ]; then
+        DBLINK_SUFFIX="@${_tgt_dict_link}"
+        generate_target_env_ddl
+        generate_grants_and_synonyms_scripts
+        DBLINK_SUFFIX=""
+    else
+        if [ "$LANG_PREF" = "EN" ]; then echo "  >> Pre-DDL / grants not generated here. Use 00_create_target_env_* / 99_post_grants_synonyms_* from menu 1."
+        else echo "  >> 사전 DDL / 권한 스크립트는 여기서 만들지 않습니다. 메뉴 1 이 만든 00_create_target_env_* / 99_post_grants_synonyms_* 를 사용하십시오."; fi
+    fi
     generate_monitoring_and_stop_scripts
 
     # 마스터 실행 파이프라인 러너 생성
+    # [FIX v09.03.02] (E3) 실행 순서를 한 곳에서 명시적으로 정한다.
+    #   예전에는 생성 함수마다 앞/뒤에 붙여서, 계정/TBS DDL 이 PDB 생성보다 먼저 오는 등
+    #   순서가 생성 순서에 따라 달라졌다.
+    GENERATED_TARGET_SCRIPTS=$(order_target_steps "$GENERATED_TARGET_SCRIPTS")
     generate_master_runner_script "Target Server Import Pipeline" "$GENERATED_TARGET_SCRIPTS"
 
     echo "======================================================================"
@@ -7959,7 +8299,7 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
 echo ">> Oracle 사전 이관 DB 환경 및 객체 진단을 수행합니다..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$DIAG_SQL
 CONNECT_EOF
 echo ">> 사전 진단이 완료되었습니다. 결과 로그 파일: pre_migration_check_${UNIQUE_ID}.log"
@@ -8038,47 +8378,66 @@ run_tuning_advisor() {
     APPLY_SH="migration_tuning_apply_${UNIQUE_ID}.sh"
     RESTORE_SH="migration_tuning_restore_${UNIQUE_ID}.sh"
 
+    # ------------------------------------------------------------------
+    # [FIX v09.03.02] (B22) 튜닝 적용 / 원복
+    #   예전 문제:
+    #     - 원복이 "원래 값" 이 아니라 하드코딩 기본값(streams_pool_size=0, undo_retention=900)
+    #       이었고 parallel_max_servers 원복은 아예 없었다.
+    #     - 권장값이 현재값보다 작아도 그대로 SET 해서 "증가" 가 오히려 줄이는 경우가 있었다.
+    #     - RAC 에서 SID='*' 가 없어 접속한 인스턴스에만 적용되었다.
+    #     - recyclebin 구문의 DEFERRED / SCOPE 순서가 문법과 달랐다.
+    #   지금:
+    #     - 적용 스크립트가 바꾸기 직전의 실제 값을 읽어 원복 SQL 을 그 자리에서 만든다.
+    #     - 숫자 파라미터는 현재값보다 클 때만 올린다.
+    #     - 모든 변경에 SCOPE=MEMORY SID='*' (재기동하면 원래 값으로 돌아온다).
+    # ------------------------------------------------------------------
+    rec_streams_bytes=$((rec_streams_mb * 1024 * 1024))
     cat <<EOF > "$APPLY_SQL"
 -- ==============================================================================
 --  Oracle Migration Performance Tuning Apply Script
 --  Job ID: ${UNIQUE_ID}
+--  실행하면 먼저 현재 값으로 ${RESTORE_SQL} 을 만든 뒤 변경한다.
 -- ==============================================================================
-SET ECHO ON LOGONLY SERVEROUTPUT ON
-SPOOL migration_tuning_apply_${UNIQUE_ID}.log
+WHENEVER SQLERROR EXIT FAILURE
 
-PROMPT 1. Adjusting STREAMS_POOL_SIZE for Parallel Workers...
-ALTER SYSTEM SET streams_pool_size=${rec_streams_str} SCOPE=MEMORY;
-
-PROMPT 2. Increasing UNDO_RETENTION to prevent ORA-01555...
-ALTER SYSTEM SET undo_retention=${rec_undo_ret} SCOPE=MEMORY;
-
-PROMPT 3. Tuning Parallel Execution Server Limits...
-ALTER SYSTEM SET parallel_max_servers=${rec_p_max} SCOPE=MEMORY;
-
-PROMPT 4. Disabling Recyclebin to reduce dictionary contention during bulk DDL...
-ALTER SYSTEM SET recyclebin=OFF SCOPE=MEMORY DEFERRED;
-
+-- 1) 변경 전 값으로 원복 SQL 생성
+SET HEAD OFF FEEDBACK OFF PAGES 0 LINES 300 TRIMSPOOL ON VERIFY OFF
+SPOOL ${RESTORE_SQL}
+PROMPT -- Restore values captured right before migration_tuning_apply (job ${UNIQUE_ID})
+PROMPT WHENEVER SQLERROR CONTINUE
+SELECT 'ALTER SYSTEM SET ' || name || '=' || NVL(value, '0') ||
+       CASE WHEN name = 'recyclebin' THEN ' DEFERRED' END ||
+       ' SCOPE=MEMORY SID=''*'';'
+  FROM v\$parameter
+ WHERE name IN ('streams_pool_size', 'undo_retention', 'parallel_max_servers', 'recyclebin')
+ ORDER BY name;
+PROMPT EXIT;
 SPOOL OFF
-EXIT;
-EOF
 
-    cat <<EOF > "$RESTORE_SQL"
--- ==============================================================================
---  Oracle Migration Performance Tuning Post-Restore Script
---  Job ID: ${UNIQUE_ID}
--- ==============================================================================
-SET ECHO ON LOGONLY SERVEROUTPUT ON
-SPOOL migration_tuning_restore_${UNIQUE_ID}.log
-
-PROMPT 1. Restoring STREAMS_POOL_SIZE to Auto/Default...
-ALTER SYSTEM SET streams_pool_size=0 SCOPE=MEMORY;
-
-PROMPT 2. Restoring UNDO_RETENTION to Default (900s)...
-ALTER SYSTEM SET undo_retention=900 SCOPE=MEMORY;
-
-PROMPT 3. Re-enabling Recyclebin...
-ALTER SYSTEM SET recyclebin=ON SCOPE=MEMORY DEFERRED;
-
+-- 2) 적용 (숫자 파라미터는 현재보다 클 때만)
+SET SERVEROUTPUT ON SIZE UNLIMITED FEEDBACK ON
+SPOOL migration_tuning_apply_${UNIQUE_ID}.log
+DECLARE
+  PROCEDURE raise_to(p_name VARCHAR2, p_target NUMBER) IS
+    v_cur NUMBER;
+  BEGIN
+    EXECUTE IMMEDIATE 'SELECT TO_NUMBER(value) FROM v\$parameter WHERE name = :1'
+       INTO v_cur USING p_name;
+    IF NVL(v_cur, 0) < p_target THEN
+      EXECUTE IMMEDIATE 'ALTER SYSTEM SET ' || p_name || '=' || p_target || ' SCOPE=MEMORY SID=''*''';
+      DBMS_OUTPUT.PUT_LINE('  ' || RPAD(p_name, 22) || ': ' || v_cur || ' -> ' || p_target);
+    ELSE
+      DBMS_OUTPUT.PUT_LINE('  ' || RPAD(p_name, 22) || ': ' || v_cur || ' (already >= ' || p_target || ', unchanged)');
+    END IF;
+  END;
+BEGIN
+  raise_to('streams_pool_size',    ${rec_streams_bytes});
+  raise_to('undo_retention',       ${rec_undo_ret});
+  raise_to('parallel_max_servers', ${rec_p_max});
+  EXECUTE IMMEDIATE 'ALTER SYSTEM SET recyclebin=OFF DEFERRED SCOPE=MEMORY SID=''*''';
+  DBMS_OUTPUT.PUT_LINE('  recyclebin            : OFF (new sessions)');
+END;
+/
 SPOOL OFF
 EXIT;
 EOF
@@ -8090,12 +8449,19 @@ export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
-echo ">> 이관 성능 최적화 파라미터를 인스턴스에 적용합니다..."
+echo ">> 이관 성능 최적화 파라미터를 인스턴스에 적용합니다 (변경 전 값은 ${RESTORE_SQL} 에 저장)..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+WHENEVER SQLERROR EXIT FAILURE
+connect $(hd_esc "$DB_CONN")
 @$APPLY_SQL
 CONNECT_EOF
+_rc=\$?
+if [ "\$_rc" -ne 0 ]; then
+    echo ">> [실패] 파라미터 적용 실패 (sqlplus exit=\$_rc). 로그: migration_tuning_apply_${UNIQUE_ID}.log"
+    exit "\$_rc"
+fi
 echo ">> 적용 완료. 로그: migration_tuning_apply_${UNIQUE_ID}.log"
+echo ">> 원복: bash $RESTORE_SH"
 EOF
     chmod 700 "$APPLY_SH"
 
@@ -8106,12 +8472,16 @@ export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
-echo ">> 마이그레이션 완료 후 파라미터를 원래 상태로 원복합니다..."
+if [ ! -s "$RESTORE_SQL" ]; then
+    echo ">> [오류] $RESTORE_SQL 이 없습니다. 적용 스크립트($APPLY_SH)가 실행될 때 변경 전 값으로 만들어집니다."
+    exit 1
+fi
+echo ">> 마이그레이션 완료 후 파라미터를 적용 전 값으로 원복합니다..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$RESTORE_SQL
 CONNECT_EOF
-echo ">> 원복 완료. 로그: migration_tuning_restore_${UNIQUE_ID}.log"
+echo ">> 원복 완료."
 EOF
     chmod 700 "$RESTORE_SH"
 
@@ -8148,7 +8518,9 @@ run_integrity_check() {
     if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Database Link to Source DB for Cross-Check (leave empty if none) [MIG_LINK]: "
     else printf "  Source DB와 직접 교차 검증할 DB Link 이름 입력 (미사용 시 공백) [기본값: MIG_LINK]: "; fi
     _read dblink_val
-    [ -z "$dblink_val" ] && dblink_val="MIG_LINK"
+    # [FIX v09.03.02] (B21) 안내는 "미사용 시 공백" 인데 빈 값을 MIG_LINK 로 바꿔 버렸다.
+    #   빈 값이면 링크 없이 진행한다. 이 링크는 시퀀스 동기화의 기준값으로 쓰인다.
+    dblink_val=$(echo "$dblink_val" | tr '[:lower:]' '[:upper:]' | awk '{$1=$1;print}')
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
     UNIQUE_ID="INTEGRITY_${DATE_STR}"
@@ -8226,35 +8598,101 @@ SPOOL OFF
 EXIT;
 EOF
 
+    # ------------------------------------------------------------------
+    # [FIX v09.03.02] (B21) 시퀀스 동기화
+    #   예전: Source 값과 비교 없이 모든 시퀀스를 +1000. 내부 스키마 시퀀스도 포함,
+    #         감소 시퀀스(INCREMENT BY -1)는 반대 방향으로 움직였고, 입력받은 DB Link 는
+    #         쓰지 않았다. Source 가 1000 넘게 앞서 있으면 ORA-00001 을 막지 못했다.
+    #   지금: DB Link 가 있으면 Source 의 LAST_NUMBER 보다 뒤처진 시퀀스만, 그 차이
+    #         (+캐시 여유)만큼 앞으로 민다. 링크가 없으면 기존처럼 +1000 여유만 둔다.
+    #         Oracle 내부 계정 / IDENTITY 용 시퀀스(ISEQ$$_) / 감소 시퀀스는 건드리지 않는다.
+    # ------------------------------------------------------------------
+    _seq_excl=$(ora_internal_excl "sequence_owner")
+    _seq_link_sql=$(echo "$dblink_val" | sed "s/'/''/g")
     cat <<EOF > "$SEQ_FIX_SQL"
 -- ==============================================================================
---  Oracle Sequence Synchronization & Auto-Adjustment Script
+--  Oracle Sequence Synchronization (Target <- Source)
 --  Prevents ORA-00001 unique constraint violations on Target DB
 --  Generated for Job: ${UNIQUE_ID}
+--  Reference DB Link: ${dblink_val:-(none - fixed +1000 headroom mode)}
 -- ==============================================================================
-SET SERVEROUTPUT ON LINES 200
+SET SERVEROUTPUT ON SIZE UNLIMITED LINES 200
 $PDB_SWITCH_SQL
 SPOOL fix_sequences_${UNIQUE_ID}.log
 
 DECLARE
-  v_fix_count NUMBER := 0;
+  v_link   VARCHAR2(128) := '${_seq_link_sql}';
+  v_remote NUMBER;
+  v_gap    NUMBER;
+  v_new    NUMBER;
+  v_ok     NUMBER := 0;
+  v_skip   NUMBER := 0;
+  v_err    NUMBER := 0;
+  v_seq    VARCHAR2(300);
 BEGIN
-  DBMS_OUTPUT.PUT_LINE('>> Analyzing sequences for safe head room (+1000 buffer)...');
+  IF v_link IS NULL THEN
+    DBMS_OUTPUT.PUT_LINE('>> No reference DB Link: adding fixed +1000 headroom to ascending sequences.');
+  ELSE
+    DBMS_OUTPUT.PUT_LINE('>> Reference DB Link ' || v_link || ': advancing sequences that are behind the Source.');
+  END IF;
   FOR s IN (
-    SELECT sequence_owner, sequence_name, last_number, increment_by 
-    FROM dba_sequences 
-    WHERE sequence_owner NOT IN ('SYS','SYSTEM','XDB','WMSYS','AUDSYS')
+    SELECT sequence_owner, sequence_name, last_number, increment_by, max_value, cache_size
+      FROM dba_sequences
+     WHERE ${_seq_excl}
+       AND sequence_name NOT LIKE 'ISEQ' || CHR(36) || CHR(36) || '%'
+     ORDER BY sequence_owner, sequence_name
   ) LOOP
+    v_seq := '"' || s.sequence_owner || '"."' || s.sequence_name || '"';
     BEGIN
-      EXECUTE IMMEDIATE 'ALTER SEQUENCE "' || s.sequence_owner || '"."' || s.sequence_name || '" INCREMENT BY 1000';
-      EXECUTE IMMEDIATE 'SELECT "' || s.sequence_owner || '"."' || s.sequence_name || '".NEXTVAL FROM dual' INTO v_fix_count;
-      EXECUTE IMMEDIATE 'ALTER SEQUENCE "' || s.sequence_owner || '"."' || s.sequence_name || '" INCREMENT BY ' || s.increment_by;
-      DBMS_OUTPUT.PUT_LINE('Adjusted: ' || s.sequence_owner || '.' || s.sequence_name || ' -> New NextVal: ' || v_fix_count);
+      v_gap := NULL;
+      IF s.increment_by <= 0 THEN
+        DBMS_OUTPUT.PUT_LINE('  [SKIP] ' || v_seq || ' : descending sequence - check manually');
+        v_skip := v_skip + 1;
+      ELSIF v_link IS NULL THEN
+        v_gap := 1000;
+      ELSE
+        BEGIN
+          EXECUTE IMMEDIATE 'SELECT last_number FROM dba_sequences@' || v_link ||
+                            ' WHERE sequence_owner = :1 AND sequence_name = :2'
+             INTO v_remote USING s.sequence_owner, s.sequence_name;
+        EXCEPTION WHEN NO_DATA_FOUND THEN
+          v_remote := NULL;
+        END;
+        IF v_remote IS NULL THEN
+          DBMS_OUTPUT.PUT_LINE('  [SKIP] ' || v_seq || ' : not found in Source');
+          v_skip := v_skip + 1;
+        ELSIF v_remote <= s.last_number THEN
+          v_skip := v_skip + 1;    -- 이미 Source 와 같거나 앞서 있음
+        ELSE
+          -- Source 의 LAST_NUMBER 는 캐시 상한이라 실제 사용값보다 크거나 같다.
+          -- Target 쪽 캐시만큼 여유를 더해 확실히 넘어서게 한다.
+          v_gap := v_remote - s.last_number + s.cache_size * s.increment_by + s.increment_by;
+        END IF;
+      END IF;
+
+      IF v_gap IS NOT NULL THEN
+        IF s.last_number + v_gap > s.max_value THEN
+          DBMS_OUTPUT.PUT_LINE('  [SKIP] ' || v_seq || ' : would exceed MAXVALUE ' || s.max_value);
+          v_skip := v_skip + 1;
+        ELSE
+          EXECUTE IMMEDIATE 'ALTER SEQUENCE ' || v_seq || ' INCREMENT BY ' || v_gap;
+          EXECUTE IMMEDIATE 'SELECT ' || v_seq || '.NEXTVAL FROM dual' INTO v_new;
+          EXECUTE IMMEDIATE 'ALTER SEQUENCE ' || v_seq || ' INCREMENT BY ' || s.increment_by;
+          DBMS_OUTPUT.PUT_LINE('  [ADJUSTED] ' || v_seq || ' : ' || s.last_number || ' -> ' || v_new);
+          v_ok := v_ok + 1;
+        END IF;
+      END IF;
     EXCEPTION WHEN OTHERS THEN
-      DBMS_OUTPUT.PUT_LINE('Skip sequence ' || s.sequence_owner || '.' || s.sequence_name || ': ' || SQLERRM);
+      v_err := v_err + 1;
+      DBMS_OUTPUT.PUT_LINE('  [FAILED] ' || v_seq || ' : ' || SUBSTR(SQLERRM, 1, 160));
+      -- 증가값을 바꾼 채 실패했을 수 있으므로 원래 값으로 되돌려 둔다.
+      BEGIN
+        EXECUTE IMMEDIATE 'ALTER SEQUENCE ' || v_seq || ' INCREMENT BY ' || s.increment_by;
+      EXCEPTION WHEN OTHERS THEN NULL;
+      END;
     END;
   END LOOP;
-  DBMS_OUTPUT.PUT_LINE('>> Sequence Synchronization Adjustment Completed.');
+  DBMS_OUTPUT.PUT_LINE('>> Adjusted ' || v_ok || ' / unchanged or skipped ' || v_skip || ' / failed ' || v_err);
 END;
 /
 SPOOL OFF
@@ -8270,7 +8708,7 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
 echo ">> [1/2] 객체 매트릭스, 제약조건, 인덱스 및 시퀀스 심층 진단을 수행합니다..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$INT_SQL
 CONNECT_EOF
 
@@ -8279,7 +8717,7 @@ printf "지금 시퀀스 동기화 보정 스크립트를 실행하시겠습니�
 read run_seq_fix
 if [ "\$run_seq_fix" = "y" ] || [ "\$run_seq_fix" = "Y" ]; then
     sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$SEQ_FIX_SQL
 CONNECT_EOF
 fi
@@ -8757,7 +9195,7 @@ EOF
         cat <<EOF >> "$_sh"
 echo ">> ${_ds} 실행 중..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @${_sq}
 CONNECT_EOF
 _rc=\$?
@@ -8812,7 +9250,7 @@ fi
 V_ENTRY=\$(echo "\$V_ENTRY" | tr 'a-z' 'A-Z')
 
 sqlplus -S /nolog <<SQLEOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 SET LINES 32767 PAGES 500 TRIMSPOOL ON TRIMOUT ON
 -- ==============================================================================
 -- [FIX v08.04] 12.2 부터 식별자가 VARCHAR2(128) 이라 SQL*Plus 가 컬럼마다
@@ -8909,6 +9347,62 @@ EOF
 #   * ps -ef | grep sqlplus | kill -9 -> 이 작업의 스크립트만 한정 종료
 #   * IOT 가 dba_segments 조인에서 통째로 누락되던 문제 -> 스칼라 서브쿼리로 변경
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# [FIX v09.03.02] (E9) ROWCOUNT / HASH 생성 스크립트의 "실행 쪽" 접속 블록
+#   이 스크립트들은 ASIS(AS) 서버와 TOBE(TO) 서버 양쪽에서 실행된다. 예전에는 TOBE 의
+#   접속 문자열 / ORACLE_SID / PDB 전환문을 그대로 박아, ASIS 서버에서 돌리면 엉뚱한
+#   인스턴스에 붙거나 없는 PDB 로 전환하다 실패했다. 또 ROWCOUNT 버킷 실행에는 PDB
+#   전환이 아예 없어 TOBE(CDB) 에서도 테이블을 찾지 못했다.
+#   emit_side_env_block 은 PFX 가 정해진 뒤에 들어갈 셸 코드를 출력한다.
+#     TO : 생성 시점의 환경 / 접속 / 컨테이너
+#     AS : 그 서버의 ORACLE_HOME / ORACLE_SID 를 그대로 쓰고,
+#          접속은 MIG_AS_CONN (기본 / as sysdba), CDB 면 MIG_AS_PDB 에 PDB 이름
+# ------------------------------------------------------------------------------
+emit_side_env_block() {
+    echo '# [v09.03.02] (E9) 실행하는 쪽(PFX)에 맞는 접속 정보'
+    echo 'if [ "$PFX" = "TO" ]; then'
+    printf '    export ORACLE_HOME=%s\n' "$(sh_quote "$ORACLE_HOME")"
+    printf '    export ORACLE_SID=%s\n' "$(sh_quote "$ORACLE_SID")"
+    printf '    _conn=%s\n' "$(sh_quote "$DB_CONN")"
+    printf '    _container_sql=%s\n' "$(sh_quote "$PDB_SWITCH_SQL")"
+    cat <<'EOF'
+else
+    _conn="${MIG_AS_CONN:-/ as sysdba}"
+    _container_sql=""
+    [ -n "$MIG_AS_PDB" ] && _container_sql="ALTER SESSION SET CONTAINER = ${MIG_AS_PDB};"
+fi
+[ -n "$ORACLE_HOME" ] && export PATH="$ORACLE_HOME/bin:$PATH"
+export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+EOF
+}
+
+# [FIX v09.03.02] (E9) 준비(prep) SQL 을 AS / TO 에 맞는 접속으로 실행하는 래퍼
+#   emit_side_prep_wrapper <대상.sh> <prep.sql> <설명>
+emit_side_prep_wrapper() {
+    {
+        echo '#!/bin/bash'
+        echo "# ${3} — 사용법: bash $(basename "$1") <AS|TO>"
+        echo '#   AS 쪽 접속: MIG_AS_CONN (기본 / as sysdba), CDB 면 MIG_AS_PDB=<PDB 이름>'
+        echo 'cd "$(dirname "$0")" || exit 1'
+        echo 'PFX="${1:-AS}"'
+        echo 'case "$PFX" in AS|TO) ;; *) echo "[ERROR] PREFIX 는 AS 또는 TO 입니다: $PFX"; exit 1 ;; esac'
+        emit_side_env_block
+        cat <<EOF
+sqlplus -S /nolog <<CONNECT_EOF
+WHENEVER SQLERROR EXIT FAILURE
+connect \$_conn
+\$_container_sql
+WHENEVER SQLERROR CONTINUE
+@${2} \$PFX
+CONNECT_EOF
+_rc=\$?
+[ "\$_rc" -ne 0 ] && { echo ">> [실패] ${3} (sqlplus exit=\$_rc)"; exit "\$_rc"; }
+echo ">> [완료] ${3} (\$PFX)"
+EOF
+    } > "$1"
+    chmod 700 "$1"
+}
 
 generate_rowcount_scripts() {
     # [NEW v08.03] 함수 스크래치 변수 지역화 — 메뉴 재진입/함수 간 값 누수 차단
@@ -9007,14 +9501,14 @@ generate_rowcount_scripts() {
 -- ==============================================================================
 --  ROW COUNT Step 1 : 카운트 대상 목록 추출 및 버킷 분배
 --  Job ID  : ${UNIQUE_ID}
---  사용법  : sqlplus <conn> @${RC_PREP_SQL} <PREFIX>
+--  사용법  : bash rowcount_1_prepare_${UNIQUE_ID}.sh <PREFIX>   (이 SQL 을 감싸는 래퍼)
 --            PREFIX 는 AS 또는 TO  (예: @${RC_PREP_SQL} AS)
 -- ==============================================================================
 SET VERIFY OFF FEEDBACK OFF HEAD OFF PAGES 0 LINES 4000 TRIMSPOOL ON LONG 100000
 WHENEVER SQLERROR CONTINUE
 DEFINE PFX = &1
 
-${PDB_SWITCH_SQL}
+-- [v09.03.02] (E9) 컨테이너 전환은 prepare 래퍼(.sh)가 실행 쪽(AS/TO)에 맞게 한다.
 
 PROMPT >> &PFX._TAB_CNT 테이블을 재생성합니다...
 DROP TABLE &PFX._TAB_CNT PURGE;
@@ -9052,6 +9546,9 @@ FROM (
 SPOOL OFF
 EXIT;
 EOF
+    # [FIX v09.03.02] (E9) prep SQL 을 실행 쪽(AS/TO)에 맞는 접속으로 돌리는 래퍼
+    RC_PREP_SH="rowcount_1_prepare_${UNIQUE_ID}.sh"
+    emit_side_prep_wrapper "$RC_PREP_SH" "$RC_PREP_SQL" "ROW COUNT 준비 (건수 테이블/수집문 생성)"
 
     # ---------------- 2) 버킷 분할 ----------------
     echo "  * 생성 중: $RC_SPLIT_SH (앵커링된 버킷 분할)"
@@ -9115,12 +9612,8 @@ EOF
 #  슬롯이 비는 즉시 다음 버킷을 투입하고(PID 추적), 마지막에 wait 로
 #  전부 회수한 뒤 버킷별 종료코드를 집계한다.
 # ==============================================================================
-export ORACLE_HOME=$ORACLE_HOME
-export ORACLE_SID=$ORACLE_SID
-export PATH=\$ORACLE_HOME/bin:\$PATH
-export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
-
 PFX="\${1:-AS}"
+$(emit_side_env_block)
 CONC="\${2:-${RC_BUCKETS}}"
 BUCKETS=${RC_BUCKETS}
 OUTDIR="./rc_scripts_${UNIQUE_ID}"
@@ -9170,7 +9663,8 @@ while [ \$_n -lt \$BUCKETS ]; do
     done
 
     sqlplus -S /nolog <<CONNECT_EOF > "\${LOGDIR}/\${PFX}_CNT_\${_n}.out" 2>&1 &
-connect $DB_CONN
+connect \$_conn
+\$_container_sql
 @\$_f
 CONNECT_EOF
     _bg_pid=\$!
@@ -9391,7 +9885,7 @@ EOF
     cat <<EOF >> "$RC_CMP_SH"
 echo ">> 실측 건수 대조를 수행합니다..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @${RC_CMP_SQL}
 CONNECT_EOF
 EOF
@@ -9475,7 +9969,7 @@ echo ">> 주의: Oracle 세션은 남아 있을 수 있습니다. v\\\$session �
 EOF
     chmod 700 "$RC_STOP_SH"
 
-    GENERATED_ROWCOUNT_SCRIPTS="$RC_SPLIT_SH $RC_EXEC_SH $RC_CMP_SH"
+    GENERATED_ROWCOUNT_SCRIPTS="$RC_PREP_SH $RC_SPLIT_SH $RC_EXEC_SH $RC_CMP_SH"
     return 0
 }
 
@@ -9512,15 +10006,13 @@ setup_deep_dblink() {
         echo "  >> [MOCK] DB Link '$DEEP_LINK_NAME' 미존재로 가정 — 생성 DDL 경로를 검증합니다."
         _dl_cnt=0
     else
-        _dl_cnt=$(sqlplus -S /nolog <<SQL_EOF 2>/dev/null
-connect $DB_CONN
-SET HEAD OFF FEEDBACK OFF PAGES 0
-$PDB_SWITCH_SQL
-SELECT COUNT(*) FROM dba_db_links WHERE db_link LIKE '${DEEP_LINK_NAME}%';
-EXIT;
-SQL_EOF
-)
-        _dl_cnt=$(to_num "$_dl_cnt")
+        # [FIX v09.03.02] (B11/B15) 공통 확인 함수 사용 (LIKE 'NAME%' 는 MIG_LINK2 까지 잡았다)
+        _dl_cnt=$(dblink_count "$DEEP_LINK_NAME")
+        if [ -z "$_dl_cnt" ]; then
+            if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] Could not check whether DB Link '$DEEP_LINK_NAME' exists."
+            else echo "  [오류] DB Link '$DEEP_LINK_NAME' 존재 여부를 확인하지 못했습니다 (접속/권한 확인)."; fi
+            return 1
+        fi
     fi
 
     if [ "$_dl_cnt" -eq 0 ]; then
@@ -9628,7 +10120,8 @@ run_deep_diff_mode() {
     _read user_id
     if [ -z "$user_id" ]; then UNIQUE_ID="DEEP_${DATE_STR}"; else UNIQUE_ID=$(echo "$user_id" | tr ' ' '_'); fi
 
-    setup_deep_dblink
+    # [FIX v09.03.02] (B15) 링크를 확인·생성하지 못했으면 링크를 전제로 한 생성물을 만들지 않는다.
+    setup_deep_dblink || return 1
 
     echo "----------------------------------------------------------------------"
     if [ "$LANG_PREF" = "EN" ]; then printf "  Additional owners to exclude (comma separated, empty for none): "
@@ -9732,7 +10225,7 @@ generate_hash_scripts() {
 -- ==============================================================================
 --  HASH Step 1 : 테이블별 해시 수집문 생성
 --  Job ID  : ${UNIQUE_ID}
---  사용법  : sqlplus <conn> @${HS_PREP_SQL} <PREFIX>      (PREFIX = AS | TO)
+--  사용법  : bash hash_1_prepare_${UNIQUE_ID}.sh <PREFIX>      (이 SQL 을 감싸는 래퍼)      (PREFIX = AS | TO)
 --
 --  정규화 규칙은 ASIS/TOBE 양쪽에서 반드시 동일해야 합니다.
 --  아래 세션 설정이 그 전제이므로 임의로 바꾸지 마십시오.
@@ -9744,7 +10237,7 @@ DEFINE PFX = &1
 ALTER SESSION SET NLS_NUMERIC_CHARACTERS = '.,';
 ALTER SESSION SET NLS_DATE_FORMAT = 'YYYYMMDDHH24MISS';
 
-${PDB_SWITCH_SQL}
+-- [v09.03.02] (E9) 컨테이너 전환은 prepare 래퍼(.sh)가 실행 쪽(AS/TO)에 맞게 한다.
 
 PROMPT >> &PFX._TAB_HASH 테이블을 재생성합니다...
 DROP TABLE &PFX._TAB_HASH PURGE;
@@ -9835,6 +10328,9 @@ SELECT owner, table_name, COUNT(*) AS skipped_cols
 
 EXIT;
 EOF
+    # [FIX v09.03.02] (E9) prep SQL 을 실행 쪽(AS/TO)에 맞는 접속으로 돌리는 래퍼
+    HS_PREP_SH="hash_1_prepare_${UNIQUE_ID}.sh"
+    emit_side_prep_wrapper "$HS_PREP_SH" "$HS_PREP_SQL" "HASH 준비 (해시 테이블/수집문 생성)"
     return 0
 }
 
@@ -9875,7 +10371,7 @@ while [ \$_n -lt \$BUCKETS ]; do
         echo "whenever sqlerror continue"
         echo "alter session set nls_numeric_characters = '.,';"
         echo "alter session set nls_date_format = 'YYYYMMDDHH24MISS';"
-        echo "${PDB_SWITCH_SQL}"
+        # [v09.03.02] (E9) 컨테이너 전환은 실행 스크립트(hash_3_exec)가 PFX 에 맞게 넣는다.
         echo "spool \${LOGDIR}/\${PFX}_HASH_\${_n}.lst"
         grep "^\${_n}#" "\$SRC" | sed "s/^\${_n}#//"
         echo "commit;"
@@ -9897,12 +10393,8 @@ EOF
 #  HASH Step 3 : 버킷 병렬 실행
 #  사용법 : bash $(basename "$HS_EXEC_SH") <PREFIX>        (PREFIX = AS | TO)
 # ==============================================================================
-export ORACLE_HOME=$ORACLE_HOME
-export ORACLE_SID=$ORACLE_SID
-export PATH=\$ORACLE_HOME/bin:\$PATH
-export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
-
 PFX="\${1:-AS}"
+$(emit_side_env_block)
 OUTDIR="./hs_scripts_${UNIQUE_ID}"
 LOGDIR="./hs_logs_${UNIQUE_ID}"
 mkdir -p "\$LOGDIR"
@@ -9918,7 +10410,8 @@ while [ \$_n -lt ${HASH_BUCKETS} ]; do
     if [ -f "\$_s" ]; then
         # [SEC v08.01] 접속 문자열은 stdin 으로만 전달한다.
         sqlplus -S /nolog <<CONNECT_EOF > "\${LOGDIR}/\${PFX}_HASH_\${_n}.out" 2>&1 &
-connect $DB_CONN
+connect \$_conn
+\$_container_sql
 @\$_s
 CONNECT_EOF
         echo \$! > "./hs_pids_${UNIQUE_ID}_\${PFX}_\${_n}.pid"
@@ -10078,7 +10571,7 @@ export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 echo ">> 해시 대조를 실행합니다..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @${HS_CMP_SQL}
 CONNECT_EOF
 echo ">> 완료. 결과: hash_5_compare_${UNIQUE_ID}.log / ${HS_RESULT_CSV}"
@@ -10184,11 +10677,12 @@ run_hash_mode() {
     echo "======================================================================"
     echo "  [실행 순서]"
     echo "   ASIS(원본 DB) 에서"
-    echo "     1) sqlplus <conn> @${HS_PREP_SQL} AS"
+    echo "     (ASIS 쪽 접속: MIG_AS_CONN=user/pw@svc, CDB 면 MIG_AS_PDB=<PDB>  — 미지정 시 / as sysdba)"
+    echo "     1) bash ${HS_PREP_SH} AS"
     echo "     2) bash ${HS_SPLIT_SH} AS"
     echo "     3) bash ${HS_EXEC_SH} AS"
     echo "   TOBE(대상 DB) 에서"
-    echo "     4) sqlplus <conn> @${HS_PREP_SQL} TO"
+    echo "     4) bash ${HS_PREP_SH} TO"
     echo "     5) bash ${HS_SPLIT_SH} TO"
     echo "     6) bash ${HS_EXEC_SH} TO"
     if [ -n "$DEEP_LINK_NAME" ]; then
@@ -10201,7 +10695,7 @@ run_hash_mode() {
     echo "  [해시함수] ${HASH_FUNC_USED}"
     echo "======================================================================"
 
-    GENERATED_HASH_SCRIPTS="$HS_SPLIT_SH $HS_EXEC_SH $HS_CMP_SH"
+    GENERATED_HASH_SCRIPTS="$HS_PREP_SH $HS_SPLIT_SH $HS_EXEC_SH $HS_CMP_SH"
     echo "  [생성된 실행 스크립트]"
     for gs in $GENERATED_HASH_SCRIPTS; do echo "   - $gs"; done
     echo "======================================================================"
@@ -10328,11 +10822,12 @@ run_rowcount_mode() {
     if [ "$LANG_PREF" = "EN" ]; then echo "  >> Row Count Script Generation Complete!"
     else echo "  >> 실측 건수 대조 스크립트 생성 완료!"; fi
     echo "  [ASIS 서버에서]"
-    echo "   1) sqlplus <conn> @$RC_PREP_SQL AS"
+    echo "   (ASIS 쪽 접속: MIG_AS_CONN=user/pw@svc, CDB 면 MIG_AS_PDB=<PDB>  — 미지정 시 / as sysdba)"
+    echo "   1) bash $RC_PREP_SH AS"
     echo "   2) bash $RC_SPLIT_SH AS"
     echo "   3) bash $RC_EXEC_SH AS"
     echo "  [TOBE(검증) 서버에서]"
-    echo "   4) sqlplus <conn> @$RC_PREP_SQL TO"
+    echo "   4) bash $RC_PREP_SH TO"
     echo "   5) bash $RC_SPLIT_SH TO"
     echo "   6) bash $RC_EXEC_SH TO"
     if [ -n "$DEEP_LINK_NAME" ]; then
@@ -10730,7 +11225,7 @@ export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
 echo ">> Target 스키마/PDB 원상복구 클린업 스크립트를 실행합니다..."
 sqlplus -S /nolog <<CONNECT_EOF
-connect $DB_CONN
+connect $(hd_esc "$DB_CONN")
 @$CLEAN_SQL
 CONNECT_EOF
 echo ">> 클린업이 완료되었습니다. 결과 로그 파일: cleanup_target_${UNIQUE_ID}.log"
@@ -10961,6 +11456,16 @@ EOF
         fi
     fi
 
+    # [FIX v09.03.02] (E8) 대화형 프롬프트에 넣을 두 번째 줄
+    #   STOP_JOB / KILL_JOB 은 "Are you sure you wish to stop this job ([yes]/no):" 를 묻는다.
+    #   예전에는 그 자리에 CONTINUE_CLIENT 가 들어가 확인이 되지 않았다.
+    #   START_JOB / STATUS 는 이어서 진행 로그를 보도록 CONTINUE_CLIENT 를 넣는다.
+    # [FIX v09.03.02] (E8) ATTACH 에 소유자를 붙인다. 소유자가 다른 Job(예: SYSTEM 소유 Job 에
+    #   SYS 로 접속)은 이름만으로는 attach 하지 못했다.
+    case "$_dp_cmd" in
+        STOP_JOB*|KILL_JOB*) _dp_followup="yes" ;;
+        *)                   _dp_followup="CONTINUE_CLIENT" ;;
+    esac
     echo "  * 생성 중: $RESUME_SH ($_dp_desc)"
     cat <<EOF > "$RESUME_SH"
 #!/bin/bash
@@ -10986,15 +11491,15 @@ echo "====================================================================="
 _dp_par="./.dp_attach_\$\$.par"
 _old_umask=\$(umask); umask 077
 cat > "\$_dp_par" <<PAR_EOF
-USERID="${_dp_conn}"
-ATTACH=${SEL_JOB_NAME}
+USERID="$(hd_esc "$_dp_conn")"
+ATTACH=${SEL_JOB_OWNER}.${SEL_JOB_NAME}
 PAR_EOF
 umask "\$_old_umask"
 trap 'rm -f "\$_dp_par"' EXIT INT TERM
 
 ${DP_BIN} PARFILE="\$_dp_par" <<DP_EOF
 ${_dp_cmd}
-CONTINUE_CLIENT
+${_dp_followup}
 DP_EOF
 
 rm -f "\$_dp_par"
