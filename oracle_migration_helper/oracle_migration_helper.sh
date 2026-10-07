@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.04.05 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.04.06 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -237,6 +237,12 @@
 #            (Wallet 접속은 마스킹하지 않음 - 비밀번호가 없는데 /****@ 로 보이던 표시)
 #            Target 덤프 목록을 ls 대신 글롭으로 (경로 공백 대응)
 #            입력이 끝난(EOF) 상태에서 메인 메뉴가 무한 반복하던 문제 (예: --unattended 없이 --run)
+#        - [v09.04.06] 외부 리뷰 3단계: 산출물 전용 디렉터리
+#            Job ID 가 정해지면 MIGRATION_OUTPUT_<Job ID>/ 안에 생성 (메뉴 1/2/2-3/5/6/7/8)
+#            MIG_OUTPUT_BASE (기준 위치), MIG_OUTPUT_ISOLATE=N (예전 방식)
+#            같은 서버에서 Source / Target 을 같은 Job ID 로 만들면 뒤에 만든 쪽은 _SOURCE / _TARGET 폴더
+#            상대경로 옵션(-c / --save-config / --log)은 실행 위치 기준 절대경로로 고정
+#            메뉴 3 보고서 / 결과 CSV / 매니페스트 / par REMAP / 메뉴 9 체크포인트를 Job 폴더에서도 찾음
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -267,7 +273,7 @@ if [ -z "${BASH_VERSION:-}" ] && [ -z "${MIG_NO_BASH_REEXEC:-}" ]; then
 fi
 
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.04.05"
+SCRIPT_VERSION="09.04.06"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -370,6 +376,8 @@ STRICT_MODE="false"         # [v09.04.03] (개선6) --strict : 무인 모드에�
 CHECK_CONFIG="false"        # [v09.04.03] --check-config : 응답 파일 키 점검만 하고 종료
 RUN_LOG_FILE=""             # [v09.04.03] --log <FILE> : 화면 출력을 (접속 비밀번호 가림) 파일에도 남김
 SCRIPT_SELF="$0"
+MIG_START_DIR=$(pwd)        # [v09.04.06] 실행 위치 (산출물 디렉터리 기준 / 메뉴 종료 후 복귀)
+OUTPUT_DIR=""
 
 # [NEW v07] 압축 / 체크섬 / 전송 무결성 글로벌 변수
 COMPRESSION_PARAM=""        # COMPRESSION=ALL 등
@@ -557,6 +565,13 @@ if [ "$UNATTENDED" = "true" ] && [ -z "$AUTO_MENU" ] && [ "$CHECK_CONFIG" != "tr
     exit 1
 fi
 
+# [v09.04.06] 산출물 디렉터리로 cd 하므로 사용자가 준 상대경로는 실행 위치 기준 절대경로로 바꿔 둔다.
+case "$CONFIG_FILE" in ""|/*) : ;; *) CONFIG_FILE="$MIG_START_DIR/$CONFIG_FILE" ;; esac
+case "$SAVE_CONFIG_FILE" in ""|/*) : ;; *) SAVE_CONFIG_FILE="$MIG_START_DIR/$SAVE_CONFIG_FILE" ;; esac
+case "$RUN_LOG_FILE" in ""|/*) : ;; *) RUN_LOG_FILE="$MIG_START_DIR/$RUN_LOG_FILE" ;; esac
+case "$SCRIPT_SELF" in /*) : ;; */*) SCRIPT_SELF="$MIG_START_DIR/$SCRIPT_SELF" ;; esac
+case "$MIG_OUTPUT_BASE" in ""|/*) : ;; *) MIG_OUTPUT_BASE="$MIG_START_DIR/$MIG_OUTPUT_BASE" ;; esac
+
 # [v09.04.00] (개선1) 이 도구가 만드는 파일(SQL/로그/CSV/HTML/설정)은 접속 정보나 업무 데이터
 #   일부를 담을 수 있다. 기본 권한을 소유자 전용으로 한다. (.sh 는 700, .par 는 600 으로 따로 지정)
 umask 077
@@ -609,7 +624,7 @@ init_tmpdir() {
     fi
     if [ -z "$MIG_TMPDIR" ] || [ ! -d "$MIG_TMPDIR" ]; then
         # 마지막 폴백: 현재 디렉토리 (기존 동작)
-        MIG_TMPDIR="./.migtmp_$$"
+        MIG_TMPDIR="${MIG_START_DIR:-$(pwd)}/.migtmp_$$"   # [v09.04.06] cd 해도 유효하게 절대경로
         (umask 077; mkdir "$MIG_TMPDIR") 2>/dev/null || mkdir -p "$MIG_TMPDIR" 2>/dev/null
     fi
     chmod 700 "$MIG_TMPDIR" 2>/dev/null
@@ -4921,6 +4936,61 @@ gen_random_pwd() {
 }
 
 # ------------------------------------------------------------------------------
+# [v09.04.06] 산출물 전용 디렉터리
+#   예전에는 실행 위치에 .sh / .par / .sql / .log 수십 개가 Job 구분 없이 쌓였다.
+#   Job ID 가 정해지면 <기준>/MIGRATION_OUTPUT_<Job ID>/ 를 만들고 그 안으로 들어가 생성한다.
+#   같은 Job ID 의 Source / Target / 검증(메뉴 7) / 보고서(메뉴 3) 산출물이 한 폴더에 모인다.
+#   생성 스크립트는 자기 위치로 cd 해서 돌기 때문에 폴더째 옮겨도 그대로 동작한다.
+#     MIG_OUTPUT_BASE=/path   기준 디렉터리 (기본: 도구를 실행한 디렉터리)
+#     MIG_OUTPUT_ISOLATE=N    예전처럼 실행 위치에 바로 생성
+#   메뉴가 끝나면 실행 위치로 돌아온다 (메인 루프).
+# ------------------------------------------------------------------------------
+job_output_dir() {
+    echo "${MIG_OUTPUT_BASE:-$MIG_START_DIR}/MIGRATION_OUTPUT_$1"
+}
+enter_output_dir() {
+    [ "${MIG_OUTPUT_ISOLATE:-Y}" = "N" ] && return 0
+    [ -z "$UNIQUE_ID" ] && return 0
+    OUTPUT_DIR=$(job_output_dir "$UNIQUE_ID")
+    # 같은 서버에서 Source / Target 을 같은 Job ID 로 만들면(PDB -> PDB 등) 마스터 러너와
+    # 체크포인트 이름이 같아 서로 덮어쓴다. 상대 역할의 산출물이 이미 있으면 _<역할> 폴더를 쓴다.
+    case "$1" in
+        SOURCE) _eo_other="impdp_" ;;
+        TARGET) _eo_other="expdp_" ;;
+        *)      _eo_other="" ;;
+    esac
+    if [ -n "$_eo_other" ] && [ -d "$OUTPUT_DIR" ]; then
+        for _eo_f in "$OUTPUT_DIR"/${_eo_other}*"${UNIQUE_ID}"*.sh; do
+            if [ -e "$_eo_f" ]; then
+                OUTPUT_DIR="${OUTPUT_DIR}_$1"
+                echo "  [안내] 같은 Job 폴더에 상대 서버용 산출물이 있어 ${OUTPUT_DIR##*/} 에 따로 생성합니다."
+                break
+            fi
+        done
+    fi
+    if [ "$(pwd)" = "$OUTPUT_DIR" ]; then return 0; fi
+    if ! mkdir -p "$OUTPUT_DIR" 2>/dev/null || ! cd "$OUTPUT_DIR" 2>/dev/null; then
+        echo "  [경고] 산출물 디렉터리를 만들 수 없어 현재 위치에 생성합니다: $OUTPUT_DIR"
+        OUTPUT_DIR=$(pwd)
+        return 0
+    fi
+    if [ "$LANG_PREF" = "EN" ]; then echo "  * Output directory: $OUTPUT_DIR"
+    else echo "  * 산출물 디렉터리: $OUTPUT_DIR"; fi
+    return 0
+}
+# 이전 산출물을 찾을 때 볼 디렉터리 (현재 위치 / Job 폴더 / 실행 위치)
+artifact_dirs() {
+    echo "."
+    if [ -n "$1" ]; then
+        for _ad in "$(job_output_dir "$1")" "$(job_output_dir "$1")_TARGET" "$(job_output_dir "$1")_SOURCE"; do
+            [ -d "$_ad" ] && echo "$_ad"
+        done
+    fi
+    [ "$(pwd)" != "$MIG_START_DIR" ] && echo "$MIG_START_DIR"
+    return 0
+}
+
+# ------------------------------------------------------------------------------
 # [FIX v09.04.05] 같은 Job ID 의 이전 산출물이 있으면 알린다
 #   기본 ID 가 분 단위라 같은 분에 두 작업을 띄우면 ID 가 같았다 (지금은 초 단위).
 #   같은 ID 로 진행하면 생성 스크립트 / 로그를 덮어쓰고, 같은 이름의 덤프가 남아 있으면
@@ -4929,7 +4999,12 @@ gen_random_pwd() {
 # ------------------------------------------------------------------------------
 check_uid_reuse() {
     _cu_hits=""
-    [ -f "./00_RUN_ALL_MASTER_${UNIQUE_ID}.sh" ] && _cu_hits="생성 스크립트(./00_RUN_ALL_MASTER_${UNIQUE_ID}.sh)"
+    for _cu_d in "$(job_output_dir "$UNIQUE_ID")" "$(job_output_dir "$UNIQUE_ID")_SOURCE" "."; do
+        if [ -f "${_cu_d}/00_RUN_ALL_MASTER_${UNIQUE_ID}.sh" ]; then
+            _cu_hits="생성 스크립트(${_cu_d}/00_RUN_ALL_MASTER_${UNIQUE_ID}.sh)"
+            break
+        fi
+    done
     if [ -n "$DIR_PHYSICAL_PATH" ]; then
         for _cu_f in "$DIR_PHYSICAL_PATH"/"${UNIQUE_ID}"_*.dmp "$DIR_PHYSICAL_PATH"/"${UNIQUE_ID}"_manifest.txt; do
             if [ -e "$_cu_f" ]; then
@@ -5185,7 +5260,9 @@ SET|$(echo "$_mf_b" | tr '.:' '__')|${_mf_b}"
 
 # manifest_path : Target 에서 매니페스트 위치 (덤프 디렉터리 우선, 없으면 현재 디렉터리)
 manifest_path() {
-    for _mp in "${DIR_PHYSICAL_PATH}/${UNIQUE_ID}_manifest.txt" "./${UNIQUE_ID}_manifest.txt"; do
+    for _mp in "${DIR_PHYSICAL_PATH}/${UNIQUE_ID}_manifest.txt" "./${UNIQUE_ID}_manifest.txt" \
+               "$(job_output_dir "$UNIQUE_ID")/${UNIQUE_ID}_manifest.txt" \
+               "$(job_output_dir "$UNIQUE_ID")_SOURCE/${UNIQUE_ID}_manifest.txt" "${MIG_START_DIR}/${UNIQUE_ID}_manifest.txt"; do
         [ -f "$_mp" ] && { echo "$_mp"; return 0; }
     done
     return 1
@@ -5444,7 +5521,7 @@ run_source_mode() {
         [ -z "$user_id" ] && user_id="$_uid_default"
         if UNIQUE_ID=$(normalize_unique_id "$user_id"); then
             check_uid_reuse; _cu_rc=$?
-            [ "$_cu_rc" -eq 0 ] && break
+            [ "$_cu_rc" -eq 0 ] && { enter_output_dir SOURCE; break; }
             [ "$_cu_rc" -eq 2 ] && return 1
             continue
         fi
@@ -6798,6 +6875,7 @@ run_dblink_copy_mode() {
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
     if [ -z "$UNIQUE_ID" ]; then UNIQUE_ID="DLCOPY_${DATE_STR}"; fi
+    enter_output_dir   # [v09.04.06]
 
     echo "----------------------------------------------------------------------"
     generate_dblink_copy_scripts || return 1
@@ -6994,6 +7072,7 @@ run_target_mode() {
     fi
     # [FIX v09.03.02] (E2) Source 와 같은 규칙으로 검증 (Target 버전 기준 길이 제한)
     UNIQUE_ID=$(normalize_unique_id "$user_id" keepcase) || return 1
+    enter_output_dir TARGET   # [v09.04.06]
 
     # Target PDB 신규 생성 모듈 (23c / 19c CDB 환경 지원)
     generate_target_pdb_ddl
@@ -9047,8 +9126,15 @@ find_latest_csv() {
     #   - 작업 ID 를 모를 때만 수정시각이 가장 최근인 파일을 쓴다.
     _fc_pre="$1"
     _fc_uid="$2"
+    # [v09.04.06] 현재 위치 -> Job 산출물 폴더 -> 실행 위치 순으로 찾는다
+    _fc_base="${_fc_pre##*/}"
     if [ -n "$_fc_uid" ]; then
-        [ -e "${_fc_pre}${_fc_uid}.csv" ] && echo "${_fc_pre}${_fc_uid}.csv"
+        artifact_dirs "$_fc_uid" | while IFS= read -r _fc_d; do
+            if [ -e "${_fc_d}/${_fc_base}${_fc_uid}.csv" ]; then
+                echo "${_fc_d}/${_fc_base}${_fc_uid}.csv"
+                break
+            fi
+        done
         return 0
     fi
     # shellcheck disable=SC2012
@@ -9577,7 +9663,7 @@ cs_check_note() {
 remap_tokens_for_log() {
     _rt_uid=$(basename "$1" 2>/dev/null | sed -n 's/_impdp_.*$//p')
     if [ -n "$_rt_uid" ]; then
-        for _rt_p in ./*"${_rt_uid}"*.par; do
+        for _rt_p in ./*"${_rt_uid}"*.par "$(job_output_dir "$_rt_uid")"/*"${_rt_uid}"*.par; do
             [ -f "$_rt_p" ] && grep -iE '^REMAP_(SCHEMA|TABLE)=' "$_rt_p"
         done 2>/dev/null | tr '\n' ' '
     fi
@@ -10053,6 +10139,13 @@ run_log_verify() {
     if [ -z "$gen_html_opt" ] || [ "$gen_html_opt" = "y" ] || [ "$gen_html_opt" = "Y" ]; then
         report_uid=$(echo "$exp_log_file" | sed 's/\.log$//' | sed 's/_expdp_.*//')
         [ -z "$report_uid" ] && report_uid=$(date +%Y%m%d_%H%M%S)
+        # [v09.04.06] 같은 Job 폴더가 있으면 보고서를 그 안에 만들고 그 안의 결과 CSV 를 읽는다
+        if [ "${MIG_OUTPUT_ISOLATE:-Y}" != "N" ] && [ -d "$(job_output_dir "$report_uid")" ]; then
+            # 상대경로로 받은 로그 경로는 이동 전에 절대경로로 고정한다
+            case "$exp_log" in /*) : ;; *) exp_log="$(pwd)/$exp_log" ;; esac
+            case "$imp_log" in /*) : ;; *) imp_log="$(pwd)/$imp_log" ;; esac
+            cd "$(job_output_dir "$report_uid")" && echo "  * 보고서 위치: $(pwd)"
+        fi
         generate_html_audit_report "$exp_log" "$imp_log" "$report_uid" "$exp_tmp" "$imp_tmp" "$matches" "$mismatches"
     fi
 
@@ -10231,6 +10324,7 @@ run_diagnostics_mode() {
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
     UNIQUE_ID="DIAG_${DATE_STR}"
+    enter_output_dir   # [v09.04.06]
 
     DIAG_SQL="pre_migration_check_${UNIQUE_ID}.sql"
     DIAG_SH="pre_migration_check_${UNIQUE_ID}.sh"
@@ -10413,6 +10507,7 @@ run_tuning_advisor() {
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
     UNIQUE_ID="TUNE_${DATE_STR}"
+    enter_output_dir   # [v09.04.06]
 
     # 파라미터 권장값 계산
     rec_streams_mb=$(( (CALC_PARALLEL * 30) + 256 ))
@@ -10635,6 +10730,7 @@ run_integrity_check() {
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
     UNIQUE_ID="INTEGRITY_${DATE_STR}"
+    enter_output_dir   # [v09.04.06]
 
     INT_SQL="deep_integrity_check_${UNIQUE_ID}.sql"
     INT_SH="deep_integrity_check_${UNIQUE_ID}.sh"
@@ -12288,6 +12384,7 @@ run_deep_diff_mode() {
     else printf "  작업 ID를 입력하세요 [기본값: DEEP_%s]: " "${DATE_STR}"; fi
     _read user_id
     if [ -z "$user_id" ]; then UNIQUE_ID="DEEP_${DATE_STR}"; else UNIQUE_ID=$(echo "$user_id" | tr ' ' '_'); fi
+    enter_output_dir   # [v09.04.06] Job ID 를 이관 Job 과 같게 주면 같은 폴더에 모인다
 
     # [FIX v09.03.02] (B15) 링크를 확인·생성하지 못했으면 링크를 전제로 한 생성물을 만들지 않는다.
     setup_deep_dblink || return 1
@@ -12859,6 +12956,7 @@ run_hash_mode() {
     else printf "  작업 ID를 입력하세요 [기본값: HASH_%s]: " "${DATE_STR}"; fi
     _read user_id
     if [ -z "$user_id" ]; then UNIQUE_ID="HASH_${DATE_STR}"; else UNIQUE_ID=$(echo "$user_id" | tr ' ' '_'); fi
+    enter_output_dir   # [v09.04.06] Job ID 를 이관 Job 과 같게 주면 같은 폴더에 모인다
 
     _hs_def_bucket="$CALC_PARALLEL"
     [ -z "$_hs_def_bucket" ] && _hs_def_bucket=8
@@ -12980,6 +13078,7 @@ run_rowcount_mode() {
     else printf "  작업 ID를 입력하세요 [기본값: RCNT_%s]: " "${DATE_STR}"; fi
     _read user_id
     if [ -z "$user_id" ]; then UNIQUE_ID="RCNT_${DATE_STR}"; else UNIQUE_ID=$(echo "$user_id" | tr ' ' '_'); fi
+    enter_output_dir   # [v09.04.06] Job ID 를 이관 Job 과 같게 주면 같은 폴더에 모인다
 
     # 버킷 수 = 병렬 도수 기반 자동 산정 (기존 도구는 16으로 고정되어 있었음)
     _rc_def_bucket="$CALC_PARALLEL"
@@ -13188,6 +13287,7 @@ run_cleanup_mode() {
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
     UNIQUE_ID="CLEAN_${DATE_STR}"
+    enter_output_dir   # [v09.04.06]
 
     CLEAN_SQL="cleanup_target_${UNIQUE_ID}.sql"
     CLEAN_SH="cleanup_target_${UNIQUE_ID}.sh"
@@ -13563,13 +13663,14 @@ run_resume_mode() {
     if [ "$LANG_PREF" = "EN" ]; then echo "  [1] Master Pipeline Checkpoints in current directory"
     else echo "  [1] 현재 디렉토리의 마스터 파이프라인 체크포인트 현황"; fi
     _state_found=0
-    for _st in ./master_state_*.state; do
+    # [v09.04.06] 산출물 폴더(MIGRATION_OUTPUT_*) 안의 체크포인트도 본다
+    for _st in ./master_state_*.state "${MIG_OUTPUT_BASE:-$MIG_START_DIR}"/MIGRATION_OUTPUT_*/master_state_*.state; do
         [ -e "$_st" ] || continue
         _state_found=$((_state_found + 1))
         _done_cnt=$(grep -c '^DONE:' "$_st" 2>/dev/null)
         _uid_part=$(basename "$_st" | sed 's/^master_state_//; s/\.state$//')
         printf "   - %-45s 완료 스텝: %s\n" "$(basename "$_st")" "$_done_cnt"
-        printf "     재개 명령: bash 00_RUN_ALL_MASTER_%s.sh -y --resume\n" "$_uid_part"
+        printf "     재개 명령: bash %s/00_RUN_ALL_MASTER_%s.sh -y --resume\n" "$(cd "$(dirname "$_st")" && pwd)" "$_uid_part"
     done
     if [ "$_state_found" -eq 0 ]; then
         echo "   (체크포인트 파일 없음 - 아직 마스터 러너를 실행하지 않았거나 다른 경로에 있습니다)"
@@ -13820,6 +13921,12 @@ EOF
 _menu_iteration=0
 while true; do
     _menu_iteration=$((_menu_iteration + 1))
+    # [v09.04.06] 이전 메뉴가 산출물 디렉터리로 들어갔으면 실행 위치로 돌아온다
+    cd "$MIG_START_DIR" 2>/dev/null || true
+    if [ -n "$OUTPUT_DIR" ] && [ "$OUTPUT_DIR" != "$MIG_START_DIR" ]; then
+        echo "  >> 이번 작업의 산출물: $OUTPUT_DIR"
+        OUTPUT_DIR=""
+    fi
 
     # 무인 모드 + --run 지정: 지정된 메뉴 1회 실행 후 종료
     if [ "$UNATTENDED" = "true" ] && [ -n "$AUTO_MENU" ]; then
