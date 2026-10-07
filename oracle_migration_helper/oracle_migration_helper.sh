@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.04.04 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.04.05 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -229,6 +229,14 @@
 #            sh(dash) 로 실행하면 v09.04.03 의 --log 프로세스 치환 때문에 파싱 단계에서 즉시
 #            종료되던 회귀 수정 (bash 로 재실행, --log 는 eval 로 격리)
 #            생성 전송 스크립트(PIPESTATUS) / 마스터 러너(SECONDS)도 sh 로 실행 시 bash 로 재실행
+#        - [FIX v09.04.05] 외부 리뷰 2단계
+#            sqlplus 응답 없음 방지: 도구 안의 모든 sqlplus 에 시간 제한 (MIG_SQL_TIMEOUT 기본 600초,
+#            첫 접속 MIG_SQL_CONNECT_TIMEOUT 기본 60초, 0=끔, timeout 명령 없으면 감시 루프)
+#            Job ID 기본값 초 단위, 같은 ID 의 이전 산출물(러너/덤프/매니페스트)이 있으면 경고·확인
+#            Oracle Wallet(/@별칭) 접속 안내: 접속 프롬프트, PDB 별칭 기본값, 실패 시 점검 항목
+#            (Wallet 접속은 마스킹하지 않음 - 비밀번호가 없는데 /****@ 로 보이던 표시)
+#            Target 덤프 목록을 ls 대신 글롭으로 (경로 공백 대응)
+#            입력이 끝난(EOF) 상태에서 메인 메뉴가 무한 반복하던 문제 (예: --unattended 없이 --run)
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -259,7 +267,7 @@ if [ -z "${BASH_VERSION:-}" ] && [ -z "${MIG_NO_BASH_REEXEC:-}" ]; then
 fi
 
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.04.04"
+SCRIPT_VERSION="09.04.05"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -650,6 +658,58 @@ clear_screen() {
 #   [FIX v07/R1] `[ $(...) -eq 0 ]` 형태의 미인용 명령치환으로 인한
 #                "unary operator expected" 오류와 분기 오판을 제거한다.
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# [FIX v09.04.05] sqlplus 응답 없음(Hang) 방지
+#   방화벽이 패킷을 버리는(DROP) 환경에서는 접속 시도가 오류 없이 멈춰 도구 전체가 멈췄다.
+#   이 도구 안에서 부르는 sqlplus 는 모두 이 함수를 거쳐 MIG_SQL_TIMEOUT 초(기본 600, 0=끔)
+#   안에 끝나지 않으면 중단한다. 첫 접속 확인은 MIG_SQL_CONNECT_TIMEOUT 초(기본 60)로 짧게 본다.
+#   생성되는 실행 스크립트(.sh)에는 적용하지 않는다 (적재처럼 오래 걸리는 작업이 정상이다).
+#   timeout 명령이 없는 구형 UNIX 는 백그라운드 + 감시 루프로 같은 일을 한다.
+#   시간 초과 시 출력에 ORA-12170 형태의 줄을 남겨, 기존 오류 판정(ORA- 검사)이 실패로 보게 한다.
+# ------------------------------------------------------------------------------
+MIG_SQL_TIMEOUT="${MIG_SQL_TIMEOUT:-600}"
+echo "$MIG_SQL_TIMEOUT" | grep -qE '^[0-9]+$' || MIG_SQL_TIMEOUT=600
+MIG_SQL_CONNECT_TIMEOUT="${MIG_SQL_CONNECT_TIMEOUT:-60}"
+echo "$MIG_SQL_CONNECT_TIMEOUT" | grep -qE '^[0-9]+$' || MIG_SQL_CONNECT_TIMEOUT=60
+_SP_LIMIT=""
+sqlplus() {
+    _sp_to="${_SP_LIMIT:-$MIG_SQL_TIMEOUT}"
+    if [ "$_sp_to" -le 0 ]; then
+        command sqlplus "$@"
+        return $?
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k 10 "$_sp_to" sqlplus "$@"
+        _sp_rc=$?
+        [ "$_sp_rc" -eq 137 ] && _sp_rc=124
+    else
+        command sqlplus "$@" <&0 &
+        _sp_pid=$!
+        (
+            _sp_n=0
+            while kill -0 "$_sp_pid" 2>/dev/null; do
+                sleep 1
+                _sp_n=$((_sp_n + 1))
+                if [ "$_sp_n" -ge "$_sp_to" ]; then
+                    kill -TERM "$_sp_pid" 2>/dev/null
+                    sleep 5
+                    kill -0 "$_sp_pid" 2>/dev/null && kill -KILL "$_sp_pid" 2>/dev/null
+                    break
+                fi
+            done
+        ) </dev/null >/dev/null 2>&1 &
+        _sp_wd=$!
+        wait "$_sp_pid"; _sp_rc=$?
+        wait "$_sp_wd" 2>/dev/null
+        { [ "$_sp_rc" -eq 143 ] || [ "$_sp_rc" -eq 137 ]; } && _sp_rc=124
+    fi
+    if [ "$_sp_rc" -eq 124 ]; then
+        echo "  [TIMEOUT] sqlplus 가 ${_sp_to}초 안에 끝나지 않아 중단했습니다 (방화벽 / 리스너 / 락 확인, MIG_SQL_TIMEOUT 으로 조정)" >&2
+        echo "ORA-12170: TNS:Connect timeout occurred (helper timeout ${_sp_to}s)"
+    fi
+    return "$_sp_rc"
+}
+
 to_num() {
     _tn_val=$(echo "$1" | tr -dc '0-9')
     if [ -z "$_tn_val" ]; then echo "0"; else echo "$_tn_val"; fi
@@ -944,7 +1004,9 @@ mask_conn_value() {
     #     3) '@' 없음 (sys/pw as sysdba)      -> 공백 전까지
     #   사용자명에 '@' 가 있으면(system@//host/svc) 비밀번호가 없는 것이므로 건드리지 않는다.
     #   POSIX sed 의 라벨 없는 t (Solaris 기본 sed 포함) 로 먼저 맞은 규칙에서 멈춘다.
-    echo "$1" | sed -e 's#^\([^/@ 	]*\)/"[^"]*"#\1/****#' -e t \
+    # [FIX v09.04.05] Wallet 접속(/@별칭)은 비밀번호가 없으므로 그대로 둔다 (첫 규칙에서 멈춤)
+    echo "$1" | sed -e 's#^\([[:space:]]*\)/@#\1/@#' -e t \
+                    -e 's#^\([^/@ 	]*\)/"[^"]*"#\1/****#' -e t \
                     -e 's#^\([^/@ 	]*\)/[^ 	]*@\([^@ 	]*\)#\1/****@\2#' -e t \
                     -e 's#^\([^/@ 	]*\)/[^@ 	][^@ 	]*#\1/****#'
 }
@@ -1170,7 +1232,8 @@ _read() {
         return 0
     fi
     # shellcheck disable=SC2229  # 변수명을 인자로 받아 그 변수에 읽어들이는 의도된 패턴
-    IFS= read -r "$_rd_name"
+    # [FIX v09.04.05] 입력이 끝났는지(EOF) 기록한다 (메인 메뉴가 빈 입력으로 무한 반복하지 않게)
+    IFS= read -r "$_rd_name" || _READ_EOF=1
     eval "_rd_now=\"\$$_rd_name\""
     cfg_record "$_rd_name" "$_rd_now"
     return 0
@@ -1507,7 +1570,8 @@ check_db_env() {
         export PATH="$ORACLE_HOME/bin:$PATH"
     fi
 
-    if ! command -v sqlplus >/dev/null 2>&1; then
+    # [FIX v09.04.05] sqlplus 는 시간 제한 래퍼 함수로도 정의되어 있으므로 실제 실행 파일을 본다
+    if ! (unset -f sqlplus; command -v sqlplus) >/dev/null 2>&1; then
         if [ "$LANG_PREF" = "EN" ]; then echo "  [ERROR] sqlplus not found. Check Oracle environment variables."
         else echo "  [오류] sqlplus를 찾을 수 없습니다. Oracle 환경 변수를 재확인하십시오."; fi
         return 1
@@ -1566,10 +1630,19 @@ fetch_db_info() {
         #   타지 않았고, 실환경에서 즉시 ORA-01017 로 죽는 상태로 E2E 9종을
         #   전부 통과했다. 같은 구멍을 다시 만들지 않도록, MOCK 도 실제 경로와
         #   똑같이 서비스명을 입력받아 join_pdb_connect 를 거친다.
+        if is_wallet_conn "$DB_CONN"; then
+            echo "  [Wallet] 메인 접속이 Wallet(/@별칭) 입니다. PDB 도 Wallet 에 자격증명이 등록된 TNS 별칭을 입력하십시오 (엔터 = ${SELECTED_PDB})."
+        fi
         if [ "$LANG_PREF" = "EN" ]; then printf "  Enter PDB TNS Service Name or Easy Connect for Data Pump [Default: //localhost:1521/%s]: " "$SELECTED_PDB"
         else printf "  Data Pump(expdp/impdp) 연결용 PDB 서비스명/TNS 입력 [기본값: //localhost:1521/%s]: " "$SELECTED_PDB"; fi
         _read user_pdb_tns
-        [ -z "$user_pdb_tns" ] && user_pdb_tns="//localhost:1521/${SELECTED_PDB}"
+        # [FIX v09.04.05] Wallet 접속이면 기본값은 PDB 이름과 같은 TNS 별칭
+        if is_wallet_conn "$DB_CONN"; then
+            [ -z "$user_pdb_tns" ] && user_pdb_tns="${SELECTED_PDB}"
+            wallet_alias_check "$user_pdb_tns"
+        else
+            [ -z "$user_pdb_tns" ] && user_pdb_tns="//localhost:1521/${SELECTED_PDB}"
+        fi
 
         PDB_CONNECT_STR=$(join_pdb_connect "$DB_CONN" "$user_pdb_tns")
         if [ -z "$PDB_CONNECT_STR" ]; then
@@ -1640,6 +1713,8 @@ EOF
     #   조회 한 줄이 권한 때문에 실패하는 것은 접속 실패로 취급되지 않는다.
     #   grep 은 2차 신호로만 남긴다 — 메시지 본문은 NLS 로 번역될 수 있지만
     #   ORA/SP2 코드 자체는 번역되지 않으므로 보조 판정으로는 유효하다.
+    # [FIX v09.04.05] 첫 접속은 짧은 시간 제한 (방화벽 DROP 이면 여기서 멈췄다)
+    _SP_LIMIT="$MIG_SQL_CONNECT_TIMEOUT"
     sqlplus -S /nolog <<CONNECT_EOF > "$tmp_out" 2>&1
 WHENEVER SQLERROR EXIT FAILURE
 WHENEVER OSERROR EXIT FAILURE
@@ -1647,6 +1722,7 @@ connect $DB_CONN
 @$tmp_sql
 CONNECT_EOF
     _fdi_rc=$?
+    _SP_LIMIT=""
 
     # 접속 자체가 깨졌는지 / 아무것도 못 받았는지를 먼저 가른다.
     #   _fdi_rc != 0        접속 또는 스크립트 기동 실패 (가장 확실한 신호)
@@ -1658,6 +1734,15 @@ CONNECT_EOF
     if [ "$_fdi_rc" -ne 0 ] \
        || grep -qE "ORA-0?1017|ORA-12[0-9]{3}|ORA-28009|ORA-28000|ORA-65[0-9]{3}|SP2-0640|SP2-0306" "$tmp_out" \
        || [ -z "$_fdi_ver" ]; then
+        if [ "$_fdi_rc" -eq 124 ]; then
+            echo "  [TIMEOUT] ${MIG_SQL_CONNECT_TIMEOUT}초 안에 DB 응답이 없습니다. 방화벽(포트 DROP) / 리스너 / 호스트를 확인하십시오."
+            echo "            (대기 시간 조정: MIG_SQL_CONNECT_TIMEOUT=초)"
+        fi
+        if is_wallet_conn "$DB_CONN"; then
+            echo "  [Wallet] Wallet 접속(${DB_CONN})이 실패했다면 다음을 확인하십시오:"
+            echo "           - TNS_ADMIN 의 sqlnet.ora: WALLET_LOCATION, SQLNET.WALLET_OVERRIDE=TRUE"
+            echo "           - mkstore -listCredential 에 이 별칭이 있는지 (ORA-01017 / ORA-12154)"
+        fi
         if [ "$LANG_PREF" = "EN" ]; then
             echo "  [WARNING] DB connection failed or metadata cannot be retrieved. (sqlplus exit=${_fdi_rc})"
             echo "  Proceeding with manual input."
@@ -1795,10 +1880,19 @@ SQL_EOF
             echo "  >> Target PDB: ${SELECTED_PDB} (SQL 컨테이너 자동 전환 설정 완료)"
 
             # Data Pump 연결용 Easy Connect / TNS Service Name 질의
+            if is_wallet_conn "$DB_CONN"; then
+                echo "  [Wallet] 메인 접속이 Wallet(/@별칭) 입니다. PDB 도 Wallet 에 자격증명이 등록된 TNS 별칭을 입력하십시오 (엔터 = ${SELECTED_PDB})."
+            fi
             if [ "$LANG_PREF" = "EN" ]; then printf "  Enter PDB TNS Service Name or Easy Connect for Data Pump [Default: //localhost:1521/%s]: " "$SELECTED_PDB"
             else printf "  Data Pump(expdp/impdp) 연결용 PDB 서비스명/TNS 입력 [기본값: //localhost:1521/%s]: " "$SELECTED_PDB"; fi
             _read user_pdb_tns
-            [ -z "$user_pdb_tns" ] && user_pdb_tns="//localhost:1521/${SELECTED_PDB}"
+            # [FIX v09.04.05] Wallet 접속이면 기본값은 PDB 이름과 같은 TNS 별칭
+            if is_wallet_conn "$DB_CONN"; then
+                [ -z "$user_pdb_tns" ] && user_pdb_tns="${SELECTED_PDB}"
+                wallet_alias_check "$user_pdb_tns"
+            else
+                [ -z "$user_pdb_tns" ] && user_pdb_tns="//localhost:1521/${SELECTED_PDB}"
+            fi
 
             # [FIX v09.01] 서비스명만으로는 expdp/impdp 가 접속하지 못한다.
             #   메인 접속의 자격증명을 붙여 완전한 접속 문자열로 만든다.
@@ -4827,6 +4921,59 @@ gen_random_pwd() {
 }
 
 # ------------------------------------------------------------------------------
+# [FIX v09.04.05] 같은 Job ID 의 이전 산출물이 있으면 알린다
+#   기본 ID 가 분 단위라 같은 분에 두 작업을 띄우면 ID 가 같았다 (지금은 초 단위).
+#   같은 ID 로 진행하면 생성 스크립트 / 로그를 덮어쓰고, 같은 이름의 덤프가 남아 있으면
+#   expdp 가 ORA-27038 로 실패한다. 무인 모드는 경고만 하고 진행한다 (의도한 재생성).
+#   반환: 0 = 진행, 1 = 다른 ID 입력, 2 = 중단 (응답 파일의 고정 ID 라 다시 물을 수 없음)
+# ------------------------------------------------------------------------------
+check_uid_reuse() {
+    _cu_hits=""
+    [ -f "./00_RUN_ALL_MASTER_${UNIQUE_ID}.sh" ] && _cu_hits="생성 스크립트(./00_RUN_ALL_MASTER_${UNIQUE_ID}.sh)"
+    if [ -n "$DIR_PHYSICAL_PATH" ]; then
+        for _cu_f in "$DIR_PHYSICAL_PATH"/"${UNIQUE_ID}"_*.dmp "$DIR_PHYSICAL_PATH"/"${UNIQUE_ID}"_manifest.txt; do
+            if [ -e "$_cu_f" ]; then
+                _cu_hits="${_cu_hits:+${_cu_hits}, }덤프/매니페스트(${DIR_PHYSICAL_PATH}/${UNIQUE_ID}_*)"
+                break
+            fi
+        done
+    fi
+    [ -z "$_cu_hits" ] && return 0
+    echo "  [경고] Job ID '${UNIQUE_ID}' 의 이전 산출물이 있습니다: ${_cu_hits}"
+    echo "         같은 ID 로 진행하면 스크립트 / 로그를 덮어쓰고, 같은 이름의 덤프가 있으면 expdp 가 ORA-27038 로 실패합니다."
+    if [ "$UNATTENDED" = "true" ]; then
+        echo "  [무인 모드] 의도한 재생성으로 보고 계속합니다."
+        return 0
+    fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Continue with the same ID? (y/N) [Default: N]: "
+    else printf "  같은 ID 로 계속하시겠습니까? (y/N) [기본값: N]: "; fi
+    _read uid_reuse_ok
+    if [ "$uid_reuse_ok" = "y" ] || [ "$uid_reuse_ok" = "Y" ]; then return 0; fi
+    if cfg_get user_id >/dev/null 2>&1; then
+        echo "  [중단] 응답 파일의 user_id 가 고정값입니다. 응답 파일의 user_id 를 바꾸거나 uid_reuse_ok=y 를 넣으십시오."
+        return 2
+    fi
+    return 1
+}
+
+# ------------------------------------------------------------------------------
+# [FIX v09.04.05] Oracle Wallet(External Password Store) 접속 지원 안내
+#   접속 문자열이 /@별칭 이면 비밀번호 없이 Wallet 의 자격증명으로 접속한다. 이 도구는 이 형태를
+#   그대로 par 의 USERID 로 넘기므로 평문 비밀번호가 디스크에 남지 않는다.
+#   Wallet 자격증명은 "별칭 문자열이 정확히 같아야" 쓰이므로 PDB 도 별칭으로 받는다.
+# ------------------------------------------------------------------------------
+is_wallet_conn() {
+    echo "$1" | grep -qE '^[[:space:]]*/@[^[:space:]]+'
+}
+wallet_alias_check() {
+    case "$1" in
+        */*|*:*)
+            echo "  [Wallet 주의] '$1' 은 별칭이 아니라 접속 기술자로 보입니다. Wallet 자격증명은"
+            echo "                mkstore -createCredential 에 쓴 문자열과 정확히 같아야 합니다 (보통 TNS 별칭)." ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------
 # [FIX v09.04.03] (B13) par 파일의 USERID 줄
 #   예전에는 USERID="..." 로 고정해, 비밀번호를 큰따옴표로 감싼 접속 문자열
 #   (system/"p@ss"@DB)이 USERID="system/"p@ss"@DB" 가 되어 Data Pump 가 값을 잘못 읽었다.
@@ -5063,8 +5210,8 @@ run_source_mode() {
     echo "  * Memory: $MEM_SIZE"
     echo "----------------------------------------------------------------------"
     
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account [Default: / as sysdba]: "
-    else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account (Wallet: /@TNS_ALIAS) [Default: / as sysdba]: "
+    else printf "  Oracle 접속 계정을 입력하세요 (Wallet 은 /@TNS별칭) [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
@@ -5288,13 +5435,19 @@ run_source_mode() {
         SCHEMA) _uid_pfx="MS" ;; TABLE) _uid_pfx="MT" ;;
         TABLESPACE) _uid_pfx="MTS" ;; *) _uid_pfx="MF" ;;
     esac
-    _uid_default="${_uid_pfx}_$(date +%y%m%d%H%M 2>/dev/null || echo "$$")"
+    # [FIX v09.04.05] 초 단위까지 (같은 분에 띄운 두 작업의 ID 가 같았다)
+    _uid_default="${_uid_pfx}_$(date +%y%m%d%H%M%S 2>/dev/null || echo "$$")"
     while true; do
         if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Unique Migration ID [Default: %s]: " "$_uid_default"
         else printf "  이관 작업의 고유 ID를 입력하세요 [기본값: %s]: " "$_uid_default"; fi
         _read user_id
         [ -z "$user_id" ] && user_id="$_uid_default"
-        if UNIQUE_ID=$(normalize_unique_id "$user_id"); then break; fi
+        if UNIQUE_ID=$(normalize_unique_id "$user_id"); then
+            check_uid_reuse; _cu_rc=$?
+            [ "$_cu_rc" -eq 0 ] && break
+            [ "$_cu_rc" -eq 2 ] && return 1
+            continue
+        fi
         [ "$UNATTENDED" = "true" ] && return 1
     done
     # [NEW v08.03] 사전 검증 결과를 HTML 리포트가 읽을 수 있도록 확정 기록
@@ -6822,8 +6975,8 @@ run_target_mode() {
     echo "  * Memory: $MEM_SIZE"
     echo "----------------------------------------------------------------------"
     
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account [Default: / as sysdba]: "
-    else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account (Wallet: /@TNS_ALIAS) [Default: / as sysdba]: "
+    else printf "  Oracle 접속 계정을 입력하세요 (Wallet 은 /@TNS별칭) [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
@@ -6950,8 +7103,11 @@ run_target_mode() {
     else echo "  [사전 충돌 검증 및 대상 목록 선택]"; fi
     
     if [ "$IMPORT_METHOD" = "DUMP" ]; then
-        DUMP_FILES=$(ls "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}_*.dmp 2>/dev/null)
-        DUMP_EXISTS=$(echo "$DUMP_FILES" | grep -c "\.dmp$")
+        # [FIX v09.04.05] ls 출력 대신 글롭으로 센다 (경로 공백 / 특수문자에 안전)
+        DUMP_EXISTS=0
+        for _df in "${DIR_PHYSICAL_PATH}"/"${UNIQUE_ID}"_*.dmp; do
+            [ -e "$_df" ] && DUMP_EXISTS=$((DUMP_EXISTS + 1))
+        done
         if [ "$DUMP_EXISTS" -eq 0 ]; then
             if [ "$LANG_PREF" = "EN" ]; then
                 echo "  [WARNING] No dump files matching ${UNIQUE_ID} found in ${DIR_PHYSICAL_PATH}."
@@ -6965,8 +7121,8 @@ run_target_mode() {
         else
             if [ "$LANG_PREF" = "EN" ]; then echo "  >> Dump files verified ($DUMP_EXISTS detected)"
             else echo "  >> Dump 파일 확인 완료 ($DUMP_EXISTS 개 감지)"; fi
-            ls -1 "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}_*.dmp 2>/dev/null | while read -r df; do
-                echo "     - $(basename "$df")"
+            for df in "${DIR_PHYSICAL_PATH}"/"${UNIQUE_ID}"_*.dmp; do
+                [ -e "$df" ] && echo "     - $(basename "$df")"
             done
         fi
     fi
@@ -7504,7 +7660,9 @@ EOF
         IMP_DUMPFILES=""
         PREFIXES=""
         if [ "$DUMP_EXISTS" -gt 0 ]; then
-            PREFIXES=$(ls -1 "${DIR_PHYSICAL_PATH}"/${UNIQUE_ID}_*.dmp 2>/dev/null | sed 's/_[0-9][0-9]*\.dmp$/_%U.dmp/' | awk -F'/' '{print $NF}' | sort | uniq | grep -v '_meta_custom' | grep -v '_stats_')
+            PREFIXES=$(for _df in "${DIR_PHYSICAL_PATH}"/"${UNIQUE_ID}"_*.dmp; do
+                           [ -e "$_df" ] && basename "$_df"
+                       done | sed 's/_[0-9][0-9]*\.dmp$/_%U.dmp/' | sort | uniq | grep -v '_meta_custom' | grep -v '_stats_')
             for pfx in $PREFIXES; do
                 [ -n "$IMP_DUMPFILES" ] && IMP_DUMPFILES="$IMP_DUMPFILES,"
                 IMP_DUMPFILES="$IMP_DUMPFILES$pfx"
@@ -9918,8 +10076,8 @@ run_live_monitor() {
     echo "  * CPU Cores: $CPU_CORES"
     echo "----------------------------------------------------------------------"
 
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account [Default: / as sysdba]: "
-    else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account (Wallet: /@TNS_ALIAS) [Default: / as sysdba]: "
+    else printf "  Oracle 접속 계정을 입력하세요 (Wallet 은 /@TNS별칭) [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
@@ -10063,8 +10221,8 @@ run_diagnostics_mode() {
     echo "  * Memory: $MEM_SIZE"
     echo "----------------------------------------------------------------------"
 
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account [Default: / as sysdba]: "
-    else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account (Wallet: /@TNS_ALIAS) [Default: / as sysdba]: "
+    else printf "  Oracle 접속 계정을 입력하세요 (Wallet 은 /@TNS별칭) [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
@@ -10244,8 +10402,8 @@ run_tuning_advisor() {
     echo "  * Memory: $MEM_SIZE"
     echo "----------------------------------------------------------------------"
 
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account [Default: / as sysdba]: "
-    else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account (Wallet: /@TNS_ALIAS) [Default: / as sysdba]: "
+    else printf "  Oracle 접속 계정을 입력하세요 (Wallet 은 /@TNS별칭) [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
@@ -10424,8 +10582,8 @@ run_integrity_check() {
     echo "  * CPU Cores: $CPU_CORES"
     echo "----------------------------------------------------------------------"
 
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account [Default: / as sysdba]: "
-    else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account (Wallet: /@TNS_ALIAS) [Default: / as sysdba]: "
+    else printf "  Oracle 접속 계정을 입력하세요 (Wallet 은 /@TNS별칭) [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
@@ -12688,7 +12846,7 @@ run_hash_mode() {
     echo "----------------------------------------------------------------------"
 
     if [ "$LANG_PREF" = "EN" ]; then printf "  Oracle connection account [Default: / as sysdba]: "
-    else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
+    else printf "  Oracle 접속 계정을 입력하세요 (Wallet 은 /@TNS별칭) [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
@@ -12809,7 +12967,7 @@ run_rowcount_mode() {
     echo "----------------------------------------------------------------------"
 
     if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection [Default: / as sysdba]: "
-    else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
+    else printf "  Oracle 접속 계정을 입력하세요 (Wallet 은 /@TNS별칭) [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
@@ -13003,8 +13161,8 @@ run_cleanup_mode() {
     echo "  * Memory: $MEM_SIZE"
     echo "----------------------------------------------------------------------"
 
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account [Default: / as sysdba]: "
-    else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account (Wallet: /@TNS_ALIAS) [Default: / as sysdba]: "
+    else printf "  Oracle 접속 계정을 입력하세요 (Wallet 은 /@TNS별칭) [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
@@ -13421,8 +13579,8 @@ run_resume_mode() {
     # ------------------------------------------------------------------
     # 2) DB 에 남아 있는 Data Pump Job 조회
     # ------------------------------------------------------------------
-    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account [Default: / as sysdba]: "
-    else printf "  Oracle 접속 계정을 입력하세요 [기본값: / as sysdba]: "; fi
+    if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Oracle connection account (Wallet: /@TNS_ALIAS) [Default: / as sysdba]: "
+    else printf "  Oracle 접속 계정을 입력하세요 (Wallet 은 /@TNS별칭) [기본값: / as sysdba]: "; fi
     _read user_conn
     [ -n "$user_conn" ] && DB_CONN="$user_conn"
 
@@ -13718,6 +13876,11 @@ while true; do
             printf "  선택하십시오 (1-10): "
         fi
         _read main_choice
+        if [ "${_READ_EOF:-0}" = "1" ] && [ -z "$main_choice" ]; then
+            echo ""
+            echo "  [종료] 입력이 끝났습니다(EOF). 무인 실행은 --unattended --run <N> 을 쓰십시오."
+            exit 1
+        fi
     fi
 
     case "$main_choice" in
