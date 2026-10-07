@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.04.03 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.04.04 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -225,6 +225,10 @@
 #            (기능) DB Link 복사 AS OF SCN (복사 시작 시 캡처 또는 지정, 검증도 같은 시점)
 #            (기능) 덤프 병렬 전송 MIG_XFER_PARALLEL
 #            (기능) --check-config (응답 파일 키 점검), --log <FILE> (비밀번호 가린 실행 로그)
+#        - [FIX v09.04.04] 외부 리뷰 1단계
+#            sh(dash) 로 실행하면 v09.04.03 의 --log 프로세스 치환 때문에 파싱 단계에서 즉시
+#            종료되던 회귀 수정 (bash 로 재실행, --log 는 eval 로 격리)
+#            생성 전송 스크립트(PIPESTATUS) / 마스터 러너(SECONDS)도 sh 로 실행 시 bash 로 재실행
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -239,8 +243,23 @@
 #  목적: Oracle 구버전 -> 신버전 이관 스크립트 생성 및 마이그레이션 종합 지원 툴
 # ==============================================================================
 
+# ------------------------------------------------------------------------------
+# [FIX v09.04.04] sh(dash) 로 실행했을 때의 즉시 종료 방지
+#   v09.04.03 의 --log 처리(프로세스 치환 >( ))는 dash 가 "파싱" 단계에서 거부해, --log 를
+#   쓰지 않아도 `sh oracle_migration_helper.sh` 가 544행 Syntax error 로 바로 끝났다.
+#   bash 가 아니면 bash 로 다시 실행한다. bash 가 없는 서버(구형 AIX 등)에서는 지금 셸로
+#   계속하되, bash 전용 기능(--log)만 막는다 (아래 --log 블록은 eval 로 감싸 파싱을 피한다).
+# ------------------------------------------------------------------------------
+if [ -z "${BASH_VERSION:-}" ] && [ -z "${MIG_NO_BASH_REEXEC:-}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        MIG_NO_BASH_REEXEC=1; export MIG_NO_BASH_REEXEC
+        exec bash "$0" "$@"
+    fi
+    echo "[WARN] bash 를 찾지 못해 현재 셸로 계속합니다 (--log 사용 불가) / bash not found"
+fi
+
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.04.03"
+SCRIPT_VERSION="09.04.04"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -541,8 +560,13 @@ if [ -n "$RUN_LOG_FILE" ]; then
         echo "[ERROR] 로그 파일을 쓸 수 없습니다 / cannot write log file: $RUN_LOG_FILE"
         exit 1
     fi
-    exec > >(tee >(sed -e 's#\([A-Za-z0-9_$]\)/"[^"]*"#\1/****#g' \
-                       -e 's#\([A-Za-z0-9_$]\)/[^ /@"]\{1,\}@#\1/****@#g' >> "$RUN_LOG_FILE")) 2>&1
+    if [ -z "${BASH_VERSION:-}" ]; then
+        echo "[ERROR] --log 는 bash 에서만 쓸 수 있습니다 / --log requires bash"
+        exit 1
+    fi
+    # [FIX v09.04.04] 프로세스 치환은 eval 안에 둔다 (bash 가 아닌 셸이 파일을 파싱하다 멈추지 않게)
+    eval 'exec > >(tee >(sed -e '"'"'s#\([A-Za-z0-9_$]\)/"[^"]*"#\1/****#g'"'"' \
+                            -e '"'"'s#\([A-Za-z0-9_$]\)/[^ /@"]\{1,\}@#\1/****@#g'"'"' >> "$RUN_LOG_FILE")) 2>&1'
     echo "[LOG] 실행 로그: $RUN_LOG_FILE (비밀번호 마스킹)"
 fi
 
@@ -3879,6 +3903,11 @@ generate_master_runner_script() {
 
     cat <<EOF > "$MASTER_RUNNER_SH"
 #!/bin/bash
+# [FIX v09.04.04] sh(dash) 로 실행해도 bash 로 다시 띄운다 (PIPESTATUS / SECONDS 는 bash 전용)
+if [ -z "\${BASH_VERSION:-}" ]; then
+    command -v bash >/dev/null 2>&1 && exec bash "\$0" "\$@"
+    echo "[ERROR] 이 스크립트는 bash 가 필요합니다 / bash is required"; exit 1
+fi
 cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
 # ==============================================================================
 #  Oracle Datapump Master Pipeline Orchestrator (${_runner_role})
@@ -5779,6 +5808,11 @@ EOF
         echo "  * 생성 중: $XFER_SH (재시도 + 무결성 검증 포함)"
         cat <<EOF > "$XFER_SH"
 #!/bin/bash
+# [FIX v09.04.04] sh(dash) 로 실행해도 bash 로 다시 띄운다 (PIPESTATUS / SECONDS 는 bash 전용)
+if [ -z "\${BASH_VERSION:-}" ]; then
+    command -v bash >/dev/null 2>&1 && exec bash "\$0" "\$@"
+    echo "[ERROR] 이 스크립트는 bash 가 필요합니다 / bash is required"; exit 1
+fi
 # [v09.04.00] 인자로 받은 경로가 상대경로면 cd 전에 절대경로로 바꾼다
 case "\${1:-}" in ""|/*) : ;; *) set -- "\$(pwd)/\$1" ;; esac
 cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)을 상대경로로 쓰므로 스크립트 위치에서 실행
