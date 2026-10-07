@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.04.07 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.04.08 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -252,6 +252,18 @@
 #            --help 에 환경변수 목록, 시간 초과 시 조정 / 세션 확인 안내
 #            마스터 러너 --archive [--with-secrets] : 산출물 tar.gz (기본 비밀번호 가림)
 #            df 여유 공간 열을 사용률 앞 열로 찾음
+#        - [FIX v09.04.08] 재점검 결과 수정
+#            (B1) DEEP DIFF / DB Link 복사의 마스터 러너·체크포인트·로그·잠금·요약 이름에 _DEEP / _DBLINK
+#                 (같은 Job ID 로 만들면 이관 러너를 덮어쓰고 체크포인트 / 잠금을 공유하던 문제)
+#            (B2) DB Link 복사가 Target 이 정한 산출물 폴더(_TARGET 포함)를 그대로 사용
+#            (B3) 메뉴 7-2/7-3/7-4 Job ID 검증, 핵심 생성물이 없으면 rc=1
+#            (B4) sqlplus 실행 중 Ctrl-C 가 시간 제한(기본 600초)까지 먹히지 않던 문제
+#                 timeout --foreground 사용(-k 미지원 timeout 도 대응). timeout 없는 서버는 대기 중에만
+#                 INT/TERM 을 잡아 sqlplus 를 끝내고 원래 처리(메뉴 4 모니터 중지 등)를 그대로 실행.
+#                 timeout 없는 서버에서 sqlplus 호출마다 최대 1초씩 늘던 대기도 없앰
+#            (B5) bash 없는 서버에서 post_validate 에 로그 대조 함수가 빠지던 문제
+#            (B6) 사전 검증의 sqlplus 실행 파일 확인이 래퍼 함수 때문에 항상 OK 이던 문제
+#            (B7) Job ID 재사용 경고를 실제로 생성할 폴더 기준으로 판단
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -282,7 +294,7 @@ if [ -z "${BASH_VERSION:-}" ] && [ -z "${MIG_NO_BASH_REEXEC:-}" ]; then
 fi
 
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.04.07"
+SCRIPT_VERSION="09.04.08"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -595,7 +607,12 @@ fi
 case "$CONFIG_FILE" in ""|/*) : ;; *) CONFIG_FILE="$MIG_START_DIR/$CONFIG_FILE" ;; esac
 case "$SAVE_CONFIG_FILE" in ""|/*) : ;; *) SAVE_CONFIG_FILE="$MIG_START_DIR/$SAVE_CONFIG_FILE" ;; esac
 case "$RUN_LOG_FILE" in ""|/*) : ;; *) RUN_LOG_FILE="$MIG_START_DIR/$RUN_LOG_FILE" ;; esac
-case "$SCRIPT_SELF" in /*) : ;; */*) SCRIPT_SELF="$MIG_START_DIR/$SCRIPT_SELF" ;; esac
+case "$SCRIPT_SELF" in
+    /*) : ;;
+    */*) SCRIPT_SELF="$MIG_START_DIR/$SCRIPT_SELF" ;;
+    *)  # [FIX v09.04.08] "bash oracle_migration_helper.sh" 처럼 경로 없이 실행한 경우
+        [ -f "$MIG_START_DIR/$SCRIPT_SELF" ] && SCRIPT_SELF="$MIG_START_DIR/$SCRIPT_SELF" ;;
+esac
 case "$MIG_OUTPUT_BASE" in ""|/*) : ;; *) MIG_OUTPUT_BASE="$MIG_START_DIR/$MIG_OUTPUT_BASE" ;; esac
 
 # [v09.04.00] (개선1) 이 도구가 만드는 파일(SQL/로그/CSV/HTML/설정)은 접속 정보나 업무 데이터
@@ -694,6 +711,7 @@ cleanup_tmp_files() {
 }
 
 on_interrupt() {
+    kill_active_sqlplus   # [FIX v09.04.08] (B4) 백그라운드로 돌던 sqlplus 도 같이 끝낸다
     cleanup_tmp_files
     echo ""
     echo ">> 사용자 중단(Ctrl+C) / Interrupted by user."
@@ -733,19 +751,47 @@ echo "$MIG_SQL_TIMEOUT" | grep -qE '^[0-9]+$' || MIG_SQL_TIMEOUT=600
 MIG_SQL_CONNECT_TIMEOUT="${MIG_SQL_CONNECT_TIMEOUT:-60}"
 echo "$MIG_SQL_CONNECT_TIMEOUT" | grep -qE '^[0-9]+$' || MIG_SQL_CONNECT_TIMEOUT=60
 _SP_LIMIT=""
+# [FIX v09.04.08] timeout 옵션을 미리 정한다.
+#   --foreground : timeout 은 기본으로 자신과 sqlplus 를 별도 프로세스 그룹에 넣어, 터미널의 Ctrl-C 가
+#                  둘 다에 닿지 않았다. 도구는 그 명령이 끝나기를 기다리므로 Ctrl-C 를 눌러도 시간 제한
+#                  (기본 600초)까지 아무 반응이 없었다 (재현 확인). 지원하면 쓴다.
+#   -k 10        : TERM 뒤에도 남으면 KILL. 지원하지 않는 timeout(BusyBox 등)에서는 뺀다.
+_SP_TIMEOUT_BIN=""
+_SP_TIMEOUT_OPTS=""
+if command -v timeout >/dev/null 2>&1; then
+    _SP_TIMEOUT_BIN="timeout"
+    if timeout --foreground -k 1 5 true >/dev/null 2>&1; then
+        _SP_TIMEOUT_OPTS="--foreground -k 10"
+    elif timeout -k 1 5 true >/dev/null 2>&1; then
+        _SP_TIMEOUT_OPTS="-k 10"
+    fi
+fi
+# [FIX v09.04.08] timeout 명령이 없을 때(백그라운드 실행) 중단 시 정리할 sqlplus PID 기록.
+#   $( ) 안에서 부른 경우 변수가 부모로 전달되지 않으므로 임시 디렉터리의 파일로 남긴다.
+kill_active_sqlplus() {
+    [ -n "$MIG_TMPDIR" ] && [ -d "$MIG_TMPDIR" ] || return 0
+    for _ka in "$MIG_TMPDIR"/.sp_active.*; do
+        [ -f "$_ka" ] || continue
+        _ka_pid=$(cat "$_ka" 2>/dev/null)
+        [ -n "$_ka_pid" ] && kill -TERM "$_ka_pid" 2>/dev/null
+        rm -f "$_ka"
+    done
+}
 sqlplus() {
     _sp_to="${_SP_LIMIT:-$MIG_SQL_TIMEOUT}"
     if [ "$_sp_to" -le 0 ]; then
         command sqlplus "$@"
         return $?
     fi
-    if command -v timeout >/dev/null 2>&1; then
-        timeout -k 10 "$_sp_to" sqlplus "$@"
+    if [ -n "$_SP_TIMEOUT_BIN" ]; then
+        # shellcheck disable=SC2086  # 옵션 목록을 단어로 나누는 의도된 사용
+        timeout $_SP_TIMEOUT_OPTS "$_sp_to" sqlplus "$@"
         _sp_rc=$?
         [ "$_sp_rc" -eq 137 ] && _sp_rc=124
     else
         command sqlplus "$@" <&0 &
         _sp_pid=$!
+        [ -n "$MIG_TMPDIR" ] && [ -d "$MIG_TMPDIR" ] && echo "$_sp_pid" > "$MIG_TMPDIR/.sp_active.$_sp_pid" 2>/dev/null
         (
             _sp_n=0
             while kill -0 "$_sp_pid" 2>/dev/null; do
@@ -753,15 +799,45 @@ sqlplus() {
                 _sp_n=$((_sp_n + 1))
                 if [ "$_sp_n" -ge "$_sp_to" ]; then
                     kill -TERM "$_sp_pid" 2>/dev/null
-                    sleep 5
+                    # [FIX v09.04.08] 5초를 무조건 기다리지 않고, 그 안에 끝나면 바로 빠진다
+                    _sp_k=0
+                    while kill -0 "$_sp_pid" 2>/dev/null && [ "$_sp_k" -lt 5 ]; do sleep 1; _sp_k=$((_sp_k + 1)); done
                     kill -0 "$_sp_pid" 2>/dev/null && kill -KILL "$_sp_pid" 2>/dev/null
                     break
                 fi
             done
         ) </dev/null >/dev/null 2>&1 &
         _sp_wd=$!
+        # [FIX v09.04.08] (B4) 백그라운드 sqlplus 는 POSIX 규칙상 SIGINT 를 무시한 채로 시작해, Ctrl-C 를
+        #   눌러도 시간 제한까지 끝나지 않았다($( ) 안에서는 출력 파이프가 열려 있어 도구도 기다렸다).
+        #   기다리는 동안만 INT/TERM 을 잡아 sqlplus 를 끝내고, 원래 트랩(메뉴 4 의 MON_STOP 등)을
+        #   복원한 뒤 같은 신호를 다시 보내 원래 처리를 그대로 태운다.
+        # INT / TERM 트랩만 저장·복원한다. 전체를 eval 하면 $( ) 서브셸 안에서 EXIT 트랩
+        # (cleanup_tmp_files)까지 살아나, 서브셸이 끝날 때 도구의 임시 디렉터리를 지웠다.
+        _sp_all_traps=$(trap)
+        _sp_saved_traps=$(printf '%s\n' "$_sp_all_traps" | grep -E '[[:space:]](SIG)?(INT|TERM)$')
+        _SP_INTR=""
+        trap '_SP_INTR=INT; kill -TERM "$_sp_pid" 2>/dev/null' INT
+        trap '_SP_INTR=TERM; kill -TERM "$_sp_pid" 2>/dev/null' TERM
         wait "$_sp_pid"; _sp_rc=$?
+        [ -n "$_SP_INTR" ] && { wait "$_sp_pid" 2>/dev/null; _sp_rc=130; }
+        trap - INT TERM
+        if [ -n "$_sp_saved_traps" ]; then
+            eval "$_sp_saved_traps"
+        else
+            # dash 등은 $(trap) 이 빈 값이다. 도구가 기록해 둔 현재 INT 처리로 복원한다.
+            # shellcheck disable=SC2064  # 지금 값(처리 명령 문자열)으로 설정하는 의도된 사용
+            trap "${_MIG_INT_TRAP:-on_interrupt}" INT
+            trap 'on_interrupt' TERM
+        fi
+        # 감시 루프는 sqlplus 가 끝나면 할 일이 없다. 1초 sleep 을 기다리지 않고 바로 끝낸다.
+        kill "$_sp_wd" 2>/dev/null
         wait "$_sp_wd" 2>/dev/null
+        rm -f "$MIG_TMPDIR/.sp_active.$_sp_pid" 2>/dev/null
+        if [ -n "$_SP_INTR" ]; then
+            kill -"$_SP_INTR" $$ 2>/dev/null
+            return 130
+        fi
         { [ "$_sp_rc" -eq 143 ] || [ "$_sp_rc" -eq 137 ]; } && _sp_rc=124
     fi
     if [ "$_sp_rc" -eq 124 ]; then
@@ -4003,8 +4079,11 @@ runbook_step_desc() {
 }
 
 generate_runbook() {
-    _rb_role="$1"; _rb_steps="$2"; _rb_runner="$3"
-    _rb_slug=$(echo "$_rb_role" | awk '{print toupper($1)}' | tr -dc 'A-Z0-9_')
+    _rb_role="$1"; _rb_steps="$2"; _rb_runner="$3"; _rb_tag="$4"
+    _rb_rid="${UNIQUE_ID}${_rb_tag}"
+    # [FIX v09.04.08] 꼬리표가 있으면 그것으로 (DB Link 복사가 "DB" 로 잘리던 이름 포함)
+    if [ -n "$_rb_tag" ]; then _rb_slug=$(echo "$_rb_tag" | tr -dc 'A-Z0-9')
+    else _rb_slug=$(echo "$_rb_role" | awk '{print toupper($1)}' | tr -dc 'A-Z0-9_'); fi
     RUNBOOK_MD="RUNBOOK_${UNIQUE_ID}_${_rb_slug:-PIPELINE}.md"
     {
         echo "# 이관 런북 — ${_rb_role}"
@@ -4041,13 +4120,13 @@ generate_runbook() {
         echo ""
         echo "## 실패 시"
         echo ""
-        echo "1. 마스터 로그 \`master_run_${UNIQUE_ID}.log\` 와 해당 스텝 로그에서 원인 확인"
+        echo "1. 마스터 로그 \`master_run_${_rb_rid}.log\` 와 해당 스텝 로그에서 원인 확인"
         echo "2. 조치 후 재개: \`bash ${_rb_runner} -y --resume\` (성공한 스텝은 건너뜀)"
         echo "3. 적재 스텝(impdp_2_data / impdp_1_execute_all / dblink_1_copy)이 도중에 끝났다면"
         echo "   중복 적재를 막기 위해 러너가 멈춥니다. 대상 테이블을 비운 뒤 \`--force-rerun\` 을 붙이거나"
         echo "   메뉴 9(RESUME) 로 Data Pump 작업을 ATTACH / START_JOB 하십시오."
         echo "4. FK / 트리거를 끈 상태로 중단했다면 \`impdp_2_1_enable_constraints_${UNIQUE_ID}.sh\` 로 원복"
-        echo "5. 실행 결과 요약: \`master_summary_${UNIQUE_ID}.json\`"
+        echo "5. 실행 결과 요약: \`master_summary_${_rb_rid}.json\`"
         echo ""
         echo "## 완료 후"
         echo ""
@@ -4063,8 +4142,13 @@ generate_runbook() {
 generate_master_runner_script() {
     _runner_role="$1"
     _script_list="$2"
+    # [FIX v09.04.08] (B1) 세 번째 인자 = 파이프라인 구분 꼬리표 (_DEEP / _DBLINK, Source / Target 은 없음)
+    #   예전에는 러너 / 체크포인트 / 로그 / 잠금 / 요약 이름이 Job ID 로만 정해져, 같은 Job ID 로
+    #   DEEP DIFF 나 DB Link 복사를 만들면 이관 러너를 덮어쓰고 체크포인트(--reset)와 잠금을 공유했다.
+    _runner_tag="$3"
+    _rid="${UNIQUE_ID}${_runner_tag}"
 
-    MASTER_RUNNER_SH="00_RUN_ALL_MASTER_${UNIQUE_ID}.sh"
+    MASTER_RUNNER_SH="00_RUN_ALL_MASTER_${_rid}.sh"
     echo "  * 생성 중: $MASTER_RUNNER_SH (통합 마스터 파이프라인 러너 - 체크포인트/재개 지원)"
 
     # 공백 정리된 스텝 목록
@@ -4098,8 +4182,8 @@ export ORACLE_SID=$ORACLE_SID
 export PATH=\$ORACLE_HOME/bin:\$PATH
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
-MASTER_LOG="master_run_${UNIQUE_ID}.log"
-STATE_FILE="master_state_${UNIQUE_ID}.state"
+MASTER_LOG="master_run_${_rid}.log"
+STATE_FILE="master_state_${_rid}.state"
 STEP_LIST="${_clean_steps}"
 
 UNATTENDED="false"
@@ -4258,7 +4342,7 @@ fi
 # [v09.04.03] (개선4) 같은 Job 의 러너가 동시에 두 번 돌지 않게 잠근다 (mkdir 는 원자적).
 #   두 번 돌면 같은 테이블에 이중 적재 / 같은 덤프 파일명 충돌(ORA-27038)이 난다.
 #   잠금을 잡은 프로세스가 이미 없으면(kill -9 / 서버 재기동) 남은 잠금을 치우고 진행한다.
-LOCK_DIR=".master_lock_${UNIQUE_ID}"
+LOCK_DIR=".master_lock_${_rid}"
 if ! mkdir "\$LOCK_DIR" 2>/dev/null; then
     _lock_pid=\$(cat "\$LOCK_DIR/pid" 2>/dev/null)
     if [ -n "\$_lock_pid" ] && kill -0 "\$_lock_pid" 2>/dev/null; then
@@ -4276,12 +4360,12 @@ echo \$\$ > "\$LOCK_DIR/pid"
 release_lock() { rm -f "\$LOCK_DIR/pid"; rmdir "\$LOCK_DIR" 2>/dev/null; }
 
 # [v09.04.03] (기능) 실행 요약 JSON + 완료/실패 알림
-#   master_summary_${UNIQUE_ID}.json : 스텝별 결과 / 소요 시간 / 종료코드 (모니터링 수집용)
+#   master_summary_${_rid}.json : 스텝별 결과 / 소요 시간 / 종료코드 (모니터링 수집용)
 #   알림 (둘 다 선택):
-#     MIG_NOTIFY_CMD='mailx -s "\$1" dba@example.com < master_summary_${UNIQUE_ID}.json'
+#     MIG_NOTIFY_CMD='mailx -s "\$1" dba@example.com < master_summary_${_rid}.json'
 #         -> sh -c 로 실행, \$1 = 한 줄 요약. MIG_NOTIFY_STATUS / MIG_NOTIFY_RC 도 넘어간다.
 #     MIG_NOTIFY_WEBHOOK=https://hooks.example.com/...  -> curl 로 {"text": "요약"} POST
-SUMMARY_JSON="master_summary_${UNIQUE_ID}.json"
+SUMMARY_JSON="master_summary_${_rid}.json"
 STEP_RESULTS=""
 RUN_STARTED=0
 add_result() { STEP_RESULTS="\${STEP_RESULTS}\$1|\$2|\$3|\$4
@@ -4502,7 +4586,7 @@ log_msg "====================================================================="
 EOF
 
     chmod 700 "$MASTER_RUNNER_SH"
-    generate_runbook "$_runner_role" "$_clean_steps" "$MASTER_RUNNER_SH"
+    generate_runbook "$_runner_role" "$_clean_steps" "$MASTER_RUNNER_SH" "$_runner_tag"
 }
 
 # ==============================================================================
@@ -4901,7 +4985,9 @@ run_preflight_checks() {
     # 1) 필수 바이너리
     if [ "$MOCK_MODE" != "true" ]; then
         for _pf_bin in sqlplus expdp impdp; do
-            if command -v "$_pf_bin" >/dev/null 2>&1; then
+            # [FIX v09.04.08] (B6) sqlplus 는 시간 제한 래퍼 함수로도 정의되어 있어 항상 "있음" 으로
+            #   보였다. 함수를 지운 서브셸에서 실제 실행 파일을 찾는다.
+            if (unset -f "$_pf_bin" 2>/dev/null; command -v "$_pf_bin") >/dev/null 2>&1; then
                 printf "   [ OK ] binary : %s\n" "$_pf_bin"
                 pf_record "BINARY" "$_pf_bin" "OK" "PATH 에서 확인됨"
             else
@@ -5097,6 +5183,27 @@ gen_random_pwd() {
 }
 
 # ------------------------------------------------------------------------------
+# [FIX v09.04.08] 생성물 확인 : verify_generated_files <파일>...
+#   파일 생성이 실패해도(잘못된 Job ID 의 경로, 디스크 부족, 권한) 메뉴가 "생성 완료" 와 rc=0 으로
+#   끝나던 문제. 핵심 생성물이 하나라도 없으면 알리고 1 을 돌려준다.
+# ------------------------------------------------------------------------------
+verify_generated_files() {
+    _vg_bad=0
+    for _vg_f in "$@"; do
+        [ -z "$_vg_f" ] && continue
+        if [ ! -s "$_vg_f" ]; then
+            echo "  [오류] 생성물이 없거나 비어 있습니다: $(pwd)/${_vg_f}"
+            _vg_bad=$((_vg_bad + 1))
+        fi
+    done
+    if [ "$_vg_bad" -gt 0 ]; then
+        echo "  [오류] 스크립트 생성이 완료되지 않았습니다 (${_vg_bad} 건). 디스크 공간 / 권한을 확인하십시오."
+        return 1
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------------------------
 # [v09.04.06] 산출물 전용 디렉터리
 #   예전에는 실행 위치에 .sh / .par / .sql / .log 수십 개가 Job 구분 없이 쌓였다.
 #   Job ID 가 정해지면 <기준>/MIGRATION_OUTPUT_<Job ID>/ 를 만들고 그 안으로 들어가 생성한다.
@@ -5109,25 +5216,32 @@ gen_random_pwd() {
 job_output_dir() {
     echo "${MIG_OUTPUT_BASE:-$MIG_START_DIR}/MIGRATION_OUTPUT_$1"
 }
+# [FIX v09.04.08] 역할(SOURCE/TARGET)에 따라 실제로 쓸 산출물 폴더를 계산한다 (cd 하지 않음).
+#   같은 서버에서 Source / Target 을 같은 Job ID 로 만들면(PDB -> PDB 등) 상대 역할의 산출물이
+#   이미 있는 폴더를 피해 _<역할> 폴더를 쓴다. enter_output_dir / check_uid_reuse 가 같이 쓴다.
+resolve_output_dir() {
+    _ro_dir=$(job_output_dir "$UNIQUE_ID")
+    case "$1" in
+        SOURCE) _ro_other="impdp_" ;;
+        TARGET) _ro_other="expdp_" ;;
+        *)      _ro_other="" ;;
+    esac
+    if [ -n "$_ro_other" ] && [ -d "$_ro_dir" ]; then
+        for _ro_f in "$_ro_dir"/${_ro_other}*"${UNIQUE_ID}"*.sh; do
+            if [ -e "$_ro_f" ]; then
+                echo "${_ro_dir}_$1"
+                return 0
+            fi
+        done
+    fi
+    echo "$_ro_dir"
+}
 enter_output_dir() {
     [ "${MIG_OUTPUT_ISOLATE:-Y}" = "N" ] && return 0
     [ -z "$UNIQUE_ID" ] && return 0
-    OUTPUT_DIR=$(job_output_dir "$UNIQUE_ID")
-    # 같은 서버에서 Source / Target 을 같은 Job ID 로 만들면(PDB -> PDB 등) 마스터 러너와
-    # 체크포인트 이름이 같아 서로 덮어쓴다. 상대 역할의 산출물이 이미 있으면 _<역할> 폴더를 쓴다.
-    case "$1" in
-        SOURCE) _eo_other="impdp_" ;;
-        TARGET) _eo_other="expdp_" ;;
-        *)      _eo_other="" ;;
-    esac
-    if [ -n "$_eo_other" ] && [ -d "$OUTPUT_DIR" ]; then
-        for _eo_f in "$OUTPUT_DIR"/${_eo_other}*"${UNIQUE_ID}"*.sh; do
-            if [ -e "$_eo_f" ]; then
-                OUTPUT_DIR="${OUTPUT_DIR}_$1"
-                echo "  [안내] 같은 Job 폴더에 상대 서버용 산출물이 있어 ${OUTPUT_DIR##*/} 에 따로 생성합니다."
-                break
-            fi
-        done
+    OUTPUT_DIR=$(resolve_output_dir "$1")
+    if [ "$OUTPUT_DIR" != "$(job_output_dir "$UNIQUE_ID")" ]; then
+        echo "  [안내] 같은 Job 폴더에 상대 서버용 산출물이 있어 ${OUTPUT_DIR##*/} 에 따로 생성합니다."
     fi
     if [ "$(pwd)" = "$OUTPUT_DIR" ]; then return 0; fi
     if ! mkdir -p "$OUTPUT_DIR" 2>/dev/null || ! cd "$OUTPUT_DIR" 2>/dev/null; then
@@ -5160,12 +5274,13 @@ artifact_dirs() {
 # ------------------------------------------------------------------------------
 check_uid_reuse() {
     _cu_hits=""
-    for _cu_d in "$(job_output_dir "$UNIQUE_ID")" "$(job_output_dir "$UNIQUE_ID")_SOURCE" "."; do
-        if [ -f "${_cu_d}/00_RUN_ALL_MASTER_${UNIQUE_ID}.sh" ]; then
-            _cu_hits="생성 스크립트(${_cu_d}/00_RUN_ALL_MASTER_${UNIQUE_ID}.sh)"
-            break
-        fi
-    done
+    # [FIX v09.04.08] (B7) 이번에 실제로 생성할 폴더만 본다. 예전에는 Target 이 먼저 만든 같은 ID 폴더
+    #   (Source 는 _SOURCE 로 비켜 가므로 덮어쓰지 않음)까지 보고 "이전 산출물" 경고를 냈다.
+    if [ "${MIG_OUTPUT_ISOLATE:-Y}" = "N" ]; then _cu_d="."
+    else _cu_d=$(resolve_output_dir SOURCE); fi
+    if [ -f "${_cu_d}/00_RUN_ALL_MASTER_${UNIQUE_ID}.sh" ]; then
+        _cu_hits="생성 스크립트(${_cu_d}/00_RUN_ALL_MASTER_${UNIQUE_ID}.sh)"
+    fi
     if [ -n "$DIR_PHYSICAL_PATH" ]; then
         for _cu_f in "$DIR_PHYSICAL_PATH"/"${UNIQUE_ID}"_*.dmp "$DIR_PHYSICAL_PATH"/"${UNIQUE_ID}"_manifest.txt; do
             if [ -e "$_cu_f" ]; then
@@ -6907,7 +7022,7 @@ EOF
     # [FIX v09.04.03] (B6) 사전 점검 -> 복사 -> 검증을 체크포인트 러너로 묶는다.
     #   점검이 FAIL 이면 복사로 넘어가지 않는다. 복사 스텝은 적재 스텝이라 도중 실패 후
     #   --resume 시 중복 적재 보호(--force-rerun 필요)가 걸린다.
-    generate_master_runner_script "DB Link Copy Pipeline" "$DL_PRE_SH $DL_COPY_SH $DL_VERIFY_SH"
+    generate_master_runner_script "DB Link Copy Pipeline" "$DL_PRE_SH $DL_COPY_SH $DL_VERIFY_SH" "_DBLINK"
     return 0
 }
 
@@ -7061,7 +7176,9 @@ run_dblink_copy_mode() {
 
     DATE_STR=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "$$")
     if [ -z "$UNIQUE_ID" ]; then UNIQUE_ID="DLCOPY_${DATE_STR}"; fi
-    enter_output_dir   # [v09.04.06]
+    # [FIX v09.04.08] (B2) Target 모드가 이미 정한 폴더(_TARGET 분리 포함)를 그대로 쓴다.
+    #   예전에는 역할 없이 다시 계산해 Source 폴더로 되돌아가 Source 러너를 덮어썼다.
+    [ -z "$OUTPUT_DIR" ] && enter_output_dir TARGET
 
     echo "----------------------------------------------------------------------"
     generate_dblink_copy_scripts || return 1
@@ -9081,9 +9198,18 @@ IMPORT_METHOD=$(sh_quote "$IMPORT_METHOD")
 VAL_REMAPS=$(sh_quote "$REMAP_PARAMS")
 _val_rc=0
 EOF
+        # [FIX v09.04.08] (B5) typeset 은 bash/ksh 전용이라 bash 없는 서버(dash)에서는 함수가 빠졌다.
+        #   쓸 수 있으면 typeset, 아니면 이 스크립트 본문에서 잘라 넣는다.
+        _lmr_def=""
+        command -v typeset >/dev/null 2>&1 && _lmr_def=$(typeset -f log_match_rows 2>/dev/null)
+        [ -z "$_lmr_def" ] && _lmr_def=$(sed -n '/^log_match_rows() {/,/^}/p' "$SCRIPT_SELF" 2>/dev/null)
+        if [ -z "$_lmr_def" ]; then
+            echo "  [경고] 로그 대조 함수를 넣지 못했습니다 - $VAL_SH 의 [3/3] 로그 대조가 동작하지 않습니다."
+            _lmr_def='log_match_rows() { echo "MISSING|(log_match_rows 미포함 - 메뉴 3 으로 대조하십시오)||"; }'
+        fi
         {
             echo 'tmpf() { echo "./.val_${1}_$$.tmp"; }'
-            typeset -f log_match_rows
+            printf '%s\n' "$_lmr_def"
         } >> "$VAL_SH"
         cat <<EOF >> "$VAL_SH"
 
@@ -10379,6 +10505,7 @@ run_live_monitor() {
     #   여기서는 플래그만 세팅하고, 루프 종료 후 전역 트랩을 복원한다.
     MON_STOP="false"
     trap 'MON_STOP="true"' INT
+    _MIG_INT_TRAP='MON_STOP="true"'   # [FIX v09.04.08] sqlplus 래퍼가 복원할 현재 INT 처리
 
     mon_iter=0
     while true; do
@@ -10480,6 +10607,7 @@ SQL_EOF
 
     # [FIX v07/B3] 전역 INT 트랩 복원
     trap 'on_interrupt' INT
+    _MIG_INT_TRAP=""
     MON_STOP="false"
     if [ "$LANG_PREF" = "EN" ]; then echo ""; echo ">> Monitor stopped. Returning to the main menu."
     else echo ""; echo ">> 모니터링을 종료하고 메인 메뉴로 돌아갑니다."; fi
@@ -12569,7 +12697,10 @@ run_deep_diff_mode() {
     if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Job ID [Default: DEEP_%s]: " "${DATE_STR}"
     else printf "  작업 ID를 입력하세요 [기본값: DEEP_%s]: " "${DATE_STR}"; fi
     _read user_id
-    if [ -z "$user_id" ]; then UNIQUE_ID="DEEP_${DATE_STR}"; else UNIQUE_ID=$(echo "$user_id" | tr ' ' '_'); fi
+    # [FIX v09.04.08] (B3) 메뉴 1/2 와 같은 규칙으로 검증한다. 예전에는 공백만 _ 로 바꿔
+    #   "../x" 같은 값이 산출물 폴더 밖에 디렉터리를 만들고 생성이 깨진 채 rc=0 으로 끝났다.
+    [ -z "$user_id" ] && user_id="DEEP_${DATE_STR}"
+    UNIQUE_ID=$(normalize_unique_id "$user_id" keepcase) || return 1
     enter_output_dir   # [v09.04.06] Job ID 를 이관 Job 과 같게 주면 같은 폴더에 모인다
 
     # [FIX v09.03.02] (B15) 링크를 확인·생성하지 못했으면 링크를 전제로 한 생성물을 만들지 않는다.
@@ -12596,7 +12727,8 @@ run_deep_diff_mode() {
     echo "======================================================================"
 
     # 마스터 파이프라인으로 실행 가능하게 러너도 생성
-    generate_master_runner_script "Deep Diff Validation Pipeline" "$GENERATED_DEEPDIFF_SCRIPTS"
+    verify_generated_files $GENERATED_DEEPDIFF_SCRIPTS || return 1   # [FIX v09.04.08] (B3)
+    generate_master_runner_script "Deep Diff Validation Pipeline" "$GENERATED_DEEPDIFF_SCRIPTS" "_DEEP"
     echo "  [Master Runner] $MASTER_RUNNER_SH"
     echo "======================================================================"
 
@@ -13141,7 +13273,10 @@ run_hash_mode() {
     if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Job ID [Default: HASH_%s]: " "${DATE_STR}"
     else printf "  작업 ID를 입력하세요 [기본값: HASH_%s]: " "${DATE_STR}"; fi
     _read user_id
-    if [ -z "$user_id" ]; then UNIQUE_ID="HASH_${DATE_STR}"; else UNIQUE_ID=$(echo "$user_id" | tr ' ' '_'); fi
+    # [FIX v09.04.08] (B3) 메뉴 1/2 와 같은 규칙으로 검증한다. 예전에는 공백만 _ 로 바꿔
+    #   "../x" 같은 값이 산출물 폴더 밖에 디렉터리를 만들고 생성이 깨진 채 rc=0 으로 끝났다.
+    [ -z "$user_id" ] && user_id="HASH_${DATE_STR}"
+    UNIQUE_ID=$(normalize_unique_id "$user_id" keepcase) || return 1
     enter_output_dir   # [v09.04.06] Job ID 를 이관 Job 과 같게 주면 같은 폴더에 모인다
 
     _hs_def_bucket="$CALC_PARALLEL"
@@ -13197,6 +13332,7 @@ run_hash_mode() {
     generate_hash_scripts       || return 1
     generate_hash_run_scripts   || return 1
     generate_hash_compare_scripts || return 1
+    verify_generated_files "$HS_PREP_SH" "$HS_SPLIT_SH" "$HS_EXEC_SH" "$HS_CMP_SH" || return 1   # [FIX v09.04.08] (B3)
 
     echo "======================================================================"
     if [ "$LANG_PREF" = "EN" ]; then echo "  >> HASH VERIFY scripts generated"
@@ -13263,7 +13399,10 @@ run_rowcount_mode() {
     if [ "$LANG_PREF" = "EN" ]; then printf "  Enter Job ID [Default: RCNT_%s]: " "${DATE_STR}"
     else printf "  작업 ID를 입력하세요 [기본값: RCNT_%s]: " "${DATE_STR}"; fi
     _read user_id
-    if [ -z "$user_id" ]; then UNIQUE_ID="RCNT_${DATE_STR}"; else UNIQUE_ID=$(echo "$user_id" | tr ' ' '_'); fi
+    # [FIX v09.04.08] (B3) 메뉴 1/2 와 같은 규칙으로 검증한다. 예전에는 공백만 _ 로 바꿔
+    #   "../x" 같은 값이 산출물 폴더 밖에 디렉터리를 만들고 생성이 깨진 채 rc=0 으로 끝났다.
+    [ -z "$user_id" ] && user_id="RCNT_${DATE_STR}"
+    UNIQUE_ID=$(normalize_unique_id "$user_id" keepcase) || return 1
     enter_output_dir   # [v09.04.06] Job ID 를 이관 Job 과 같게 주면 같은 폴더에 모인다
 
     # 버킷 수 = 병렬 도수 기반 자동 산정 (기존 도구는 16으로 고정되어 있었음)
@@ -13345,6 +13484,7 @@ run_rowcount_mode() {
 
     echo "----------------------------------------------------------------------"
     generate_rowcount_scripts
+    verify_generated_files "$RC_PREP_SH" "$RC_SPLIT_SH" "$RC_EXEC_SH" "$RC_CMP_SH" "$RC_STOP_SH" || return 1   # [FIX v09.04.08] (B3)
 
     echo "======================================================================"
     if [ "$LANG_PREF" = "EN" ]; then echo "  >> Row Count Script Generation Complete!"
@@ -14111,8 +14251,8 @@ while true; do
     cd "$MIG_START_DIR" 2>/dev/null || true
     if [ -n "$OUTPUT_DIR" ] && [ "$OUTPUT_DIR" != "$MIG_START_DIR" ]; then
         echo "  >> 이번 작업의 산출물: $OUTPUT_DIR"
-        OUTPUT_DIR=""
     fi
+    OUTPUT_DIR=""   # [FIX v09.04.08] 다음 메뉴로 값이 넘어가지 않게 항상 비운다
 
     # 무인 모드 + --run 지정: 지정된 메뉴 1회 실행 후 종료
     if [ "$UNATTENDED" = "true" ] && [ -n "$AUTO_MENU" ]; then
