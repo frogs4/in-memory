@@ -7,7 +7,7 @@
 #  Oracle Datapump Migration Helper (Enterprise Multitenant Adaptive Edition)
 #  (Linux, IBM AIX, HP-UX, Solaris Compatible)
 #  작성자: Antigravity AI
-#  버전: v09.04.06 (Enterprise Multitenant + Automation + Deep Validation Edition)
+#  버전: v09.04.07 (Enterprise Multitenant + Automation + Deep Validation Edition)
 #        - Adaptive CDB/PDB Support, 19c Non-CDB to 23c PDB Transition
 #        - Live Monitor, Tuning Advisor, Data Integrity & Sequence Sync
 #        - HTML Audit Reports, Master Pipeline Runner
@@ -243,6 +243,15 @@
 #            같은 서버에서 Source / Target 을 같은 Job ID 로 만들면 뒤에 만든 쪽은 _SOURCE / _TARGET 폴더
 #            상대경로 옵션(-c / --save-config / --log)은 실행 위치 기준 절대경로로 고정
 #            메뉴 3 보고서 / 결과 CSV / 매니페스트 / par REMAP / 메뉴 9 체크포인트를 Job 폴더에서도 찾음
+#        - [v09.04.07] 외부 리뷰 반영
+#            접속 문자열 앞에 공백이 있으면 마스킹되지 않던 문제
+#            OS CPU 감지가 1~2 로 나오면 DB cpu_count 로 PARALLEL 산정
+#            Target COMPATIBLE 사전 점검 (매니페스트 DUMP_VERSION 과 비교, 낮으면 FAIL)
+#            덤프 전송 대역폭 상한 (MB/s, MIG_XFER_BWLIMIT_MB, 병렬이면 스트림별 분배)
+#            남은 임시 디렉터리 정리 (본인 소유 + 1일 경과 + 생성 프로세스 종료)
+#            --help 에 환경변수 목록, 시간 초과 시 조정 / 세션 확인 안내
+#            마스터 러너 --archive [--with-secrets] : 산출물 tar.gz (기본 비밀번호 가림)
+#            df 여유 공간 열을 사용률 앞 열로 찾음
 #
 #  [설계 메모] WHENEVER SQLERROR 의 EXIT / CONTINUE 선택 기준
 #        EXIT FAILURE 를 쓰는 곳 — 실패하면 뒤 단계가 의미를 잃는 전제조건
@@ -273,7 +282,7 @@ if [ -z "${BASH_VERSION:-}" ] && [ -z "${MIG_NO_BASH_REEXEC:-}" ]; then
 fi
 
 # 스크립트 버전 정의 (XX.XX.XX 형태)
-SCRIPT_VERSION="09.04.06"
+SCRIPT_VERSION="09.04.07"
 
 # ------------------------------------------------------------------------------
 # [FIX v08.07] Solaris 이식성 — POSIX 도구를 PATH 앞에 둔다.
@@ -472,6 +481,23 @@ Oracle Datapump Migration Helper Tool
 
 주의: --unattended 사용 시 비밀번호(TDE/DB Link)는 보안상 config 에 저장되지 않으므로
       환경변수 MIG_TDE_PASSWORD / MIG_DBLINK_PASSWORD 로 전달해야 합니다.
+
+주요 환경변수 / Environment variables:
+  MIG_SQL_TIMEOUT=600          도구 안 sqlplus 시간 제한(초, 0=끔). 파티션이 매우 많은 DB 는 늘리십시오
+  MIG_SQL_CONNECT_TIMEOUT=60   첫 DB 접속 시간 제한(초)
+  MIG_OUTPUT_BASE=<경로>       산출물 폴더(MIGRATION_OUTPUT_<ID>)를 만들 기준 위치
+  MIG_OUTPUT_ISOLATE=N         산출물을 실행 위치에 바로 생성 (예전 방식)
+  MIG_PARALLEL_CAP=16          자동 산정 PARALLEL 상한
+  MIG_TDE_PASSWORD / MIG_DBLINK_PASSWORD / MIG_PDB_ADMIN_PASSWORD / MIG_DP_PDB_CONN
+                               비밀번호 / 접속 정보 (config 에 저장되지 않음)
+  생성 스크립트 실행 시:
+  MIG_DP_ALLOW_ORA=ORA-xxxxx,...  Data Pump 종료코드 5 에서 성공으로 볼 오류 추가
+  MIG_CHECKSUM_PARALLEL=N      체크섬 동시 계산 수
+  MIG_XFER_PARALLEL=N          덤프 동시 전송 수
+  MIG_XFER_BWLIMIT_MB=N        전송 대역폭 상한 (MB/s, 전체 합계)
+  MIG_NOTIFY_CMD / MIG_NOTIFY_WEBHOOK   마스터 러너 완료/실패 알림
+  MIG_TGT_CONN / MIG_AS_CONN / MIG_AS_PDB   Target / 검증 스크립트 접속 정보
+  마스터 러너: --archive [--with-secrets]   산출물 압축 보관 (기본은 비밀번호를 가린 사본)
 USAGE
 }
 
@@ -609,8 +635,27 @@ fi
 # ------------------------------------------------------------------------------
 MIG_TMPDIR=""
 
+# ------------------------------------------------------------------------------
+# [v09.04.07] 이전 실행이 남긴 임시 디렉터리 정리
+#   kill -9 / 서버 재기동으로 trap 이 돌지 못하면 mighelper.* / .migtmp_* 가 남는다.
+#   본인 소유이고, 하루 넘게 지났고, 만든 프로세스(.owner_pid)가 이미 없는 것만 지운다.
+# ------------------------------------------------------------------------------
+cleanup_stale_tmpdirs() {
+    for _sd in "${TMPDIR:-/tmp}"/mighelper.* "${MIG_START_DIR:-.}"/.migtmp_*; do
+        [ -d "$_sd" ] || continue
+        case "$_sd" in */mighelper.?*|*/.migtmp_?*) : ;; *) continue ;; esac
+        [ -O "$_sd" ] || continue
+        [ -n "$(find "$_sd" -prune -mtime +0 2>/dev/null)" ] || continue
+        _sd_pid=$(cat "$_sd/.owner_pid" 2>/dev/null)
+        [ -z "$_sd_pid" ] && _sd_pid=$(echo "$_sd" | sed -n 's/.*\.migtmp_\([0-9][0-9]*\)$/\1/p')
+        if [ -n "$_sd_pid" ] && kill -0 "$_sd_pid" 2>/dev/null; then continue; fi
+        rm -rf "$_sd" 2>/dev/null
+    done
+}
+
 init_tmpdir() {
     [ -n "$MIG_TMPDIR" ] && [ -d "$MIG_TMPDIR" ] && return 0
+    cleanup_stale_tmpdirs
     if command -v mktemp >/dev/null 2>&1; then
         MIG_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/mighelper.XXXXXX" 2>/dev/null)
     fi
@@ -628,6 +673,7 @@ init_tmpdir() {
         (umask 077; mkdir "$MIG_TMPDIR") 2>/dev/null || mkdir -p "$MIG_TMPDIR" 2>/dev/null
     fi
     chmod 700 "$MIG_TMPDIR" 2>/dev/null
+    echo "$$" > "$MIG_TMPDIR/.owner_pid" 2>/dev/null   # [v09.04.07] 남은 임시 디렉터리 정리 판단용
     return 0
 }
 
@@ -719,7 +765,9 @@ sqlplus() {
         { [ "$_sp_rc" -eq 143 ] || [ "$_sp_rc" -eq 137 ]; } && _sp_rc=124
     fi
     if [ "$_sp_rc" -eq 124 ]; then
-        echo "  [TIMEOUT] sqlplus 가 ${_sp_to}초 안에 끝나지 않아 중단했습니다 (방화벽 / 리스너 / 락 확인, MIG_SQL_TIMEOUT 으로 조정)" >&2
+        echo "  [TIMEOUT] sqlplus 가 ${_sp_to}초 안에 끝나지 않아 중단했습니다 (방화벽 / 리스너 / 락 확인)" >&2
+        echo "            조회가 원래 오래 걸리는 DB 면: export MIG_SQL_TIMEOUT=1800 (0=끔) 후 다시 실행" >&2
+        echo "            DB 쪽 세션은 보통 자동 정리되지만, 남아 있으면 v\$session (program LIKE 'sqlplus%') 확인" >&2
         echo "ORA-12170: TNS:Connect timeout occurred (helper timeout ${_sp_to}s)"
     fi
     return "$_sp_rc"
@@ -1020,10 +1068,12 @@ mask_conn_value() {
     #   사용자명에 '@' 가 있으면(system@//host/svc) 비밀번호가 없는 것이므로 건드리지 않는다.
     #   POSIX sed 의 라벨 없는 t (Solaris 기본 sed 포함) 로 먼저 맞은 규칙에서 멈춘다.
     # [FIX v09.04.05] Wallet 접속(/@별칭)은 비밀번호가 없으므로 그대로 둔다 (첫 규칙에서 멈춤)
+    # [FIX v09.04.07] 앞에 공백이 있으면(응답 파일의 "user_conn= system/pw@DB") 어느 규칙에도
+    #   맞지 않아 비밀번호가 그대로 출력되었다. 앞 공백을 허용한다.
     echo "$1" | sed -e 's#^\([[:space:]]*\)/@#\1/@#' -e t \
-                    -e 's#^\([^/@ 	]*\)/"[^"]*"#\1/****#' -e t \
-                    -e 's#^\([^/@ 	]*\)/[^ 	]*@\([^@ 	]*\)#\1/****@\2#' -e t \
-                    -e 's#^\([^/@ 	]*\)/[^@ 	][^@ 	]*#\1/****#'
+                    -e 's#^\([[:space:]]*[^/@ 	]*\)/"[^"]*"#\1/****#' -e t \
+                    -e 's#^\([[:space:]]*[^/@ 	]*\)/[^ 	]*@\([^@ 	]*\)#\1/****@\2#' -e t \
+                    -e 's#^\([[:space:]]*[^/@ 	]*\)/[^@ 	][^@ 	]*#\1/****#'
 }
 
 # 값이 자격증명처럼 보이는지 판정 (키 이름 또는 user/pass@svc 패턴)
@@ -1498,11 +1548,14 @@ detect_os_and_hw() {
 #   Solaris(xpg4) 에서는 여유 공간이 2배로 계산돼 디스크 부족을 놓쳤다.
 #   -k 로 1K 단위를 고정하고, -k 를 못 쓰면 헤더(512-blocks)를 보고 환산한다.
 # ------------------------------------------------------------------------------
+# [FIX v09.04.07] 여유 공간 열은 "사용률(nn%)" 바로 앞 열로 찾는다. 파일시스템 이름에 공백이
+#   있으면 고정 4번째 열이 밀려 엉뚱한 값을 읽었다.
+df_avail_col() { tail -n 1 | awk '{ for (i = NF; i > 1; i--) if ($i ~ /^[0-9]+%$/) { print $(i - 1); exit } }'; }
 df_avail_kb() {
-    _dk=$(df -Pk "$1" 2>/dev/null | tail -n 1 | awk '{print $4}')
+    _dk=$(df -Pk "$1" 2>/dev/null | df_avail_col)
     if [ -z "$_dk" ]; then
         _dk_out=$(df -P "$1" 2>/dev/null)
-        _dk=$(echo "$_dk_out" | tail -n 1 | awk '{print $4}')
+        _dk=$(echo "$_dk_out" | df_avail_col)
         echo "$_dk_out" | head -n 1 | grep -q '512' && _dk=$(( $(to_num "$_dk") / 2 ))
     fi
     to_num "$_dk"
@@ -2176,6 +2229,12 @@ calculate_parallel_degree() {
     if [ -n "$DB_CPU_COUNT" ] && echo "$DB_CPU_COUNT" | grep -qE '^[0-9]+$' 2>/dev/null; then
         if [ "$DB_CPU_COUNT" -gt 0 ] && [ "$DB_CPU_COUNT" -lt "$os_cpu" ]; then
             eff_cpu=$DB_CPU_COUNT
+        elif [ "$os_cpu" -le 2 ] && [ "$DB_CPU_COUNT" -gt "$os_cpu" ]; then
+            # [FIX v09.04.07] OS 명령(ioscan 등)이 oracle 계정 권한으로 CPU 를 다 못 보거나 실패하면
+            #   1~2 로 잡혀 PARALLEL 이 과소 산정되었다. 이때는 DB 의 cpu_count 를 쓴다.
+            eff_cpu=$DB_CPU_COUNT
+            if [ "$LANG_PREF" = "EN" ]; then echo "  >> [INFO] OS CPU detection returned ${os_cpu}; using DB cpu_count ${DB_CPU_COUNT}."
+            else echo "  >> [안내] OS 에서 CPU 를 ${os_cpu} 개로만 확인해 DB cpu_count(${DB_CPU_COUNT}) 를 사용합니다."; fi
         fi
     fi
 
@@ -3995,6 +4054,7 @@ generate_runbook() {
         echo "- [ ] 건수 / 해시 대조 (메뉴 7-3 ROW COUNT, 7-4 HASH) 및 HTML 감사 보고서(메뉴 3)"
         echo "- [ ] Invalid 객체 / 시퀀스 동기화 (메뉴 7-1)"
         echo "- [ ] DISABLE_ARCHIVE_LOGGING 을 썼다면 즉시 백업"
+        echo "- [ ] 산출물 보관: \`bash ${_rb_runner} --archive\` (비밀번호를 가린 tar.gz)"
         echo "- [ ] 임시 비밀번호 파일(pdb_admin_password_*.txt) / 접속 정보가 든 par·sql 파일 삭제 또는 안전한 곳으로 이동"
     } > "$RUNBOOK_MD"
     echo "  * 생성 중: $RUNBOOK_MD (사람용 실행 절차서)"
@@ -4031,6 +4091,7 @@ cd "\$(dirname "\$0")" || exit 1   # [v09.04.00] 생성 파일(.par/.sql/.log)�
 #    ./$(basename "$MASTER_RUNNER_SH") --from 3         # 3번 스텝부터 실행
 #    ./$(basename "$MASTER_RUNNER_SH") --reset          # 체크포인트 초기화
 #    ./$(basename "$MASTER_RUNNER_SH") -y --resume --force-rerun  # 도중 실패한 적재 스텝도 다시 실행
+#    ./$(basename "$MASTER_RUNNER_SH") --archive        # 산출물 압축 보관 (비밀번호 가림)
 # ==============================================================================
 export ORACLE_HOME=$ORACLE_HOME
 export ORACLE_SID=$ORACLE_SID
@@ -4047,6 +4108,8 @@ MAX_RETRY=1
 FROM_STEP=1
 LIST_ONLY="false"
 FORCE_RERUN="false"
+ARCHIVE_ONLY="false"
+ARCHIVE_SECRETS="false"
 
 while [ \$# -gt 0 ]; do
     case "\$1" in
@@ -4058,6 +4121,8 @@ while [ \$# -gt 0 ]; do
         --from=*)              FROM_STEP=\$(echo "\$1" | cut -d'=' -f2) ;;
         --list)                LIST_ONLY="true" ;;
         --force-rerun)         FORCE_RERUN="true" ;;
+        --archive)             ARCHIVE_ONLY="true" ;;
+        --with-secrets)        ARCHIVE_SECRETS="true" ;;
         --reset)               rm -f "\$STATE_FILE"; echo ">> 체크포인트를 초기화했습니다: \$STATE_FILE"; exit 0 ;;
         -h|--help)
             grep '^#' "\$0" | sed 's/^# \\{0,1\\}//' | head -n 20
@@ -4073,6 +4138,62 @@ echo "\$FROM_STEP" | grep -qE '^[0-9]+\$' || FROM_STEP=1
 [ "\$FROM_STEP" -lt 1 ] && FROM_STEP=1
 
 touch "\$STATE_FILE" 2>/dev/null
+
+# [v09.04.07] (기능) 산출물 압축 보관 : --archive [--with-secrets]
+#   이 폴더의 생성 스크립트 / par / sql / 로그 / 요약 / 런북을 하나의 tar.gz 로 묶는다.
+#   par 와 sql/sh 에는 접속 비밀번호가 들어 있으므로 기본은 비밀번호를 가린 사본을 묶고,
+#   임시 비밀번호 파일(pdb_admin_password_*)은 뺀다. 원본 그대로는 --with-secrets.
+#   덤프(.dmp)와 이전 보관 파일은 넣지 않는다.
+if [ "\$ARCHIVE_ONLY" = "true" ]; then
+    _ar_name="MIGRATION_ARCHIVE_${UNIQUE_ID}_\$(date '+%Y%m%d_%H%M%S')"
+    _ar_tmp="\${TMPDIR:-/tmp}/mig_archive.\$\$"
+    mkdir -p "\$_ar_tmp/\$_ar_name" || exit 1
+    chmod 700 "\$_ar_tmp"
+    trap 'rm -rf "\$_ar_tmp"' EXIT
+    _ar_n=0
+    for _ar_f in ./* ./.??*; do
+        [ -f "\$_ar_f" ] || continue
+        case "\$_ar_f" in
+            *.dmp|*.tar|*.tar.gz|./.master_lock_*|./.step_rc_*) continue ;;
+            ./pdb_admin_password_*) [ "\$ARCHIVE_SECRETS" = "true" ] || continue ;;
+        esac
+        _ar_dst="\$_ar_tmp/\$_ar_name/\$(basename "\$_ar_f")"
+        if [ "\$ARCHIVE_SECRETS" = "true" ]; then
+            cp -p "\$_ar_f" "\$_ar_dst"
+        else
+            case "\$_ar_f" in
+                *.par|*.sql|*.sh|*.conf|*.log|*.txt)
+                    sed -e 's#^\\(USERID=\\).*#\\1****#' \\
+                        -e 's#^\\(ENCRYPTION_PASSWORD=\\).*#\\1****#' \\
+                        -e 's#\\([Ii][Dd][Ee][Nn][Tt][Ii][Ff][Ii][Ee][Dd] [Bb][Yy] \\)"[^"]*"#\\1"****"#g' \\
+                        -e 's#\\([A-Za-z0-9_\$]\\)/"[^"]*"#\\1/****#g' \\
+                        -e 's#\\([A-Za-z0-9_\$]\\)/[^ /@"]\\{1,\\}@#\\1/****@#g' \\
+                        "\$_ar_f" > "\$_ar_dst" ;;
+                *) cp -p "\$_ar_f" "\$_ar_dst" ;;
+            esac
+        fi
+        _ar_n=\$((_ar_n + 1))
+    done
+    {
+        echo "Job ID   : ${UNIQUE_ID}"
+        echo "Pipeline : ${_runner_role}"
+        echo "Archived : \$(date '+%Y-%m-%d %H:%M:%S') on \$(hostname 2>/dev/null) from \$(pwd)"
+        echo "Files    : \$_ar_n"
+        if [ "\$ARCHIVE_SECRETS" = "true" ]; then echo "Secrets  : INCLUDED (원본 그대로 - 보관 위치 접근 통제 필요)"
+        else echo "Secrets  : MASKED (USERID / IDENTIFIED BY / user/pw@ 를 **** 로 가림, 비밀번호 파일 제외)"; fi
+    } > "\$_ar_tmp/\$_ar_name/ARCHIVE_INFO.txt"
+    if command -v gzip >/dev/null 2>&1; then
+        _ar_out="./\${_ar_name}.tar.gz"
+        ( cd "\$_ar_tmp" && tar cf - "\$_ar_name" ) | gzip -c > "\$_ar_out"
+    else
+        _ar_out="./\${_ar_name}.tar"
+        ( cd "\$_ar_tmp" && tar cf - "\$_ar_name" ) > "\$_ar_out"
+    fi
+    chmod 600 "\$_ar_out" 2>/dev/null
+    echo ">> 보관 파일: \$(pwd)/\${_ar_out#./} (\$_ar_n 개 파일)"
+    exit 0
+fi
+
 
 # [FIX v09.03.01] 스텝 스크립트의 개별 실행 확인을 끈다. 실행 여부는 마스터가 이미
 #   정했다(대화형이면 스텝마다 묻고, -y 면 묻지 않는다). 예전에는 -y 로 돌려도 스텝마다
@@ -4476,6 +4597,16 @@ free_space_bytes() {
 }
 
 # Source DB 버전 > Target DB 버전 이면 expdp 에 VERSION= 을 넣어야 임포트가 가능하다.
+# [v09.04.07] 버전 문자열 비교 (앞 두 자리): ver_lt 12.1.0 12.2.0.1 -> 참
+ver_lt() {
+    _vl_a1=$(echo "$1" | cut -d. -f1 | tr -dc '0-9'); _vl_a2=$(echo "$1" | cut -d. -f2 | tr -dc '0-9')
+    _vl_b1=$(echo "$2" | cut -d. -f1 | tr -dc '0-9'); _vl_b2=$(echo "$2" | cut -d. -f2 | tr -dc '0-9')
+    _vl_a1=${_vl_a1:-0}; _vl_a2=${_vl_a2:-0}; _vl_b1=${_vl_b1:-0}; _vl_b2=${_vl_b2:-0}
+    [ "$_vl_a1" -lt "$_vl_b1" ] && return 0
+    [ "$_vl_a1" -eq "$_vl_b1" ] && [ "$_vl_a2" -lt "$_vl_b2" ] && return 0
+    return 1
+}
+
 check_version_compatibility() {
     VERSION_PARAM=""
     [ -z "$TARGET_DB_VERSION" ] && return 0
@@ -4863,6 +4994,36 @@ run_preflight_checks() {
         fi
     fi
 
+    # [v09.04.07] COMPATIBLE 사전 점검
+    #   덤프 형식 버전은 Source 의 VERSION= (없으면 Source COMPATIBLE) 이다. Target 의 COMPATIBLE 이
+    #   그보다 낮으면 impdp 가 ORA-39142 (호환되지 않는 덤프 버전) 로 시작조차 못 한다.
+    #   DB 버전이 19c 라도 COMPATIBLE 을 낮게 둔 경우가 있어 버전 비교만으로는 잡히지 않았다.
+    if [ "$_pf_mode" = "TARGET" ]; then
+        if [ "$MOCK_MODE" = "true" ]; then
+            _pf_tcompat="19.0.0"
+        else
+            _pf_tcompat=$(sql_query_text "SELECT 'VAL:' || value FROM v\$parameter WHERE name = 'compatible';")
+        fi
+        _pf_dumpver=""
+        if [ "$IMPORT_METHOD" = "DUMP" ]; then
+            _pf_mf2=$(manifest_path)
+            [ -n "$_pf_mf2" ] && _pf_dumpver=$(grep '^DUMP_VERSION=' "$_pf_mf2" | tail -n 1 | cut -d= -f2)
+        fi
+        if [ -z "$_pf_tcompat" ]; then
+            echo "   [WARN] Target COMPATIBLE 을 조회하지 못했습니다 (v\$parameter 권한 확인)"
+            pf_record "VERSION" "Target COMPATIBLE" "WARN" "조회 실패"
+            _pf_warn=$((_pf_warn + 1))
+        elif [ -n "$_pf_dumpver" ] && ver_lt "$_pf_tcompat" "$_pf_dumpver"; then
+            echo "   [FAIL] Target COMPATIBLE(${_pf_tcompat}) < 덤프 버전(${_pf_dumpver}) - impdp 가 ORA-39142 로 실패합니다."
+            echo "          Source 에서 VERSION=${_pf_tcompat%.*} 처럼 Target 에 맞춰 다시 export 하십시오."
+            pf_record "VERSION" "COMPATIBLE 호환" "FAIL" "Target ${_pf_tcompat} < 덤프 ${_pf_dumpver}"
+            _pf_fail=$((_pf_fail + 1))
+        else
+            printf "   [ OK ] Target COMPATIBLE : %s%s\n" "$_pf_tcompat" "${_pf_dumpver:+ (덤프 버전 ${_pf_dumpver})}"
+            pf_record "VERSION" "COMPATIBLE 호환" "OK" "Target ${_pf_tcompat}${_pf_dumpver:+ / 덤프 ${_pf_dumpver}}"
+        fi
+    fi
+
     # 4) 버전 호환성
     if ! check_version_compatibility; then
         _pf_warn=$((_pf_warn + 1))
@@ -5230,12 +5391,21 @@ write_migration_manifest() {
     else
         _mf_bytes=$(sql_query_num "SELECT 'VAL:' || NVL(SUM(bytes), 0) FROM dba_segments${DBLINK_SUFFIX} WHERE ${_mf_pred};")
     fi
+    # [v09.04.07] 덤프 형식 버전 = VERSION= 지정값, 없으면 Source COMPATIBLE (Target 사전 점검용)
+    if [ -n "$VERSION_PARAM" ]; then
+        _mf_dver="${VERSION_PARAM#VERSION=}"
+    elif [ "$MOCK_MODE" = "true" ]; then
+        _mf_dver="19.0.0"
+    else
+        _mf_dver=$(sql_query_text "SELECT 'VAL:' || value FROM v\$parameter WHERE name = 'compatible';")
+    fi
     _mf_body="# Oracle Migration Helper v${SCRIPT_VERSION} manifest - do not edit
 UNIQUE_ID=${UNIQUE_ID}
 MIG_TYPE=${MIG_TYPE}
 ITEMS=${_mf_items}
 TABLESPACES=${_mf_ts}
-SOURCE_BYTES=${_mf_bytes}"
+SOURCE_BYTES=${_mf_bytes}
+DUMP_VERSION=${_mf_dver}"
     if [ -n "$SMALL_ITEMS" ]; then
         _mf_body="${_mf_body}
 SET|GROUP|${SMALL_ITEMS}"
@@ -6033,6 +6203,11 @@ EOF
         _read xfer_retry
         if ! echo "$xfer_retry" | grep -qE '^[0-9]+$'; then xfer_retry=3; fi
         [ "$xfer_retry" -lt 1 ] && xfer_retry=1
+        # [v09.04.07] (기능) 전송 대역폭 상한 — 운영망 대역을 다 차지해 장애를 내지 않게
+        if [ "$LANG_PREF" = "EN" ]; then printf "  - Bandwidth limit in MB/s, total (Enter = unlimited): "
+        else printf "  - 전송 대역폭 상한 MB/s, 전체 합계 (엔터 = 제한 없음): "; fi
+        _read xfer_bwlimit_mb
+        echo "$xfer_bwlimit_mb" | grep -qE '^[1-9][0-9]*$' || xfer_bwlimit_mb=0
 
         XFER_SH="transfer_dumps_to_target_${UNIQUE_ID}.sh"
         echo "  * 생성 중: $XFER_SH (재시도 + 무결성 검증 포함)"
@@ -6057,6 +6232,9 @@ TGT_USER="${tgt_user}"
 TGT_IP="${tgt_ip}"
 TGT_PATH="${tgt_path}"
 MAX_RETRY=${xfer_retry}
+# [v09.04.07] 대역폭 상한 (MB/s, 전체 합계, 0=없음). 실행 시 MIG_XFER_BWLIMIT_MB 로 바꿀 수 있다.
+BWLIMIT_MB="\${MIG_XFER_BWLIMIT_MB:-${xfer_bwlimit_mb}}"
+echo "\$BWLIMIT_MB" | grep -qE '^[0-9]+\$' || BWLIMIT_MB=0
 XFER_LOG="transfer_${UNIQUE_ID}.log"
 
 log() { echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" | tee -a "\$XFER_LOG"; }
@@ -6080,11 +6258,18 @@ fi
 send_one() {
     _f="\$1"
     _try=1
+    # 병렬 전송이면 상한을 스트림 수로 나눈다 (합계가 상한을 넘지 않게)
+    _bw_opt_r=""; _bw_opt_s=""
+    if [ "\$BWLIMIT_MB" -gt 0 ]; then
+        _bw_kb=\$(( BWLIMIT_MB * 1024 / \${XFER_PAR:-1} )); [ "\$_bw_kb" -lt 1 ] && _bw_kb=1
+        _bw_opt_r="--bwlimit=\$_bw_kb"          # rsync: KB/s
+        _bw_opt_s="-l \$(( _bw_kb * 8 ))"       # scp  : Kbit/s
+    fi
     while [ \$_try -le \$MAX_RETRY ]; do
         if [ "\$XFER_TOOL" = "rsync" ]; then
-            rsync -a --partial --timeout=120 -e "ssh \$SSH_OPTS" "\$_f" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" && return 0
+            rsync -a --partial --timeout=120 \$_bw_opt_r -e "ssh \$SSH_OPTS" "\$_f" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" && return 0
         else
-            scp -p \$SSH_OPTS "\$_f" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" && return 0
+            scp -p \$_bw_opt_s \$SSH_OPTS "\$_f" "\${TGT_USER}@\${TGT_IP}:\${TGT_PATH}/" && return 0
         fi
         log "   [RETRY \$_try/\$MAX_RETRY] 전송 실패: \$(basename "\$_f")"
         _try=\$((_try + 1))
@@ -6108,6 +6293,7 @@ _sent=0; _failed=0
 XFER_PAR="\${MIG_XFER_PARALLEL:-1}"
 echo "\$XFER_PAR" | grep -qE '^[1-9][0-9]*\$' || XFER_PAR=1
 [ "\$XFER_PAR" -gt 1 ] && log "  - Parallel: \$XFER_PAR"
+[ "\$BWLIMIT_MB" -gt 0 ] && log "  - Bandwidth limit: \${BWLIMIT_MB} MB/s (total)"
 _st_dir="./.xfer_st_\$\$"
 mkdir -p "\$_st_dir" || exit 1
 trap 'rm -f "\$_st_dir"/*; rmdir "\$_st_dir" 2>/dev/null' EXIT
